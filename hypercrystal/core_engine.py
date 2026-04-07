@@ -16,6 +16,7 @@ Fixes applied:
 - #010: project_to_ball guards against near-zero vectors
 - #011: Threading locks (RLock) for state mutations
 - #053: Stable concept identification via UUID
+- #FIX: Fallback Concept class no longer shadows `uuid` module
 """
 
 import json
@@ -27,7 +28,7 @@ import warnings
 import hashlib
 import secrets
 import threading
-import uuid
+import uuid as uuid_module
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any, Set, Union
@@ -67,27 +68,6 @@ except ImportError:
     warnings.warn("RNE modules not found. Using minimal fallbacks.")
 
     # Minimal fallback classes and functions
-    class Concept:
-        def __init__(self, subsymbolic=None, symbolic=None, causal_graph=None,
-                     sophia_score=0.5, dark_wisdom_density=0.0, paradox_intensity=0.0,
-                     chronon_entanglement=0.0, biophoton_amplitude=0.0, z3_phase=1+0j,
-                     retrocausal_kernel=None, uuid=None):
-            self.uuid = uuid if uuid is not None else str(uuid.uuid4())
-            self.subsymbolic = np.asarray(subsymbolic, dtype=np.float64) if subsymbolic is not None else np.random.randn(64)
-            self.symbolic = symbolic or []
-            self.causal_graph = causal_graph or CausalGraph()
-            self.sophia_score = sophia_score
-            self.dark_wisdom_density = dark_wisdom_density
-            self.paradox_intensity = paradox_intensity
-            self.chronon_entanglement = chronon_entanglement
-            self.biophoton_amplitude = biophoton_amplitude
-            self.z3_phase = z3_phase
-            self.retrocausal_kernel = retrocausal_kernel if retrocausal_kernel is not None else np.random.randn(10) * 0.1
-        def distance(self, other):
-            return np.linalg.norm(self.subsymbolic - other.subsymbolic)
-        def to_text(self):
-            return f"Concept(sophia={self.sophia_score:.3f})"
-
     class CausalGraph:
         def __init__(self, vertices=None, edges=None, retrocausal_edges=None):
             self.vertices = vertices or []
@@ -105,6 +85,29 @@ except ImportError:
             self._validation_llm = None
         def add_to_memory(self, c):
             self.K_t.append(c)
+
+    class Concept:
+        def __init__(self, subsymbolic=None, symbolic=None, causal_graph=None,
+                     sophia_score=0.5, dark_wisdom_density=0.0, paradox_intensity=0.0,
+                     chronon_entanglement=0.0, biophoton_amplitude=0.0, z3_phase=1+0j,
+                     retrocausal_kernel=None, concept_uuid=None):
+            # Use concept_uuid to avoid shadowing the uuid module
+            import uuid as uuid_module
+            self.uuid = concept_uuid if concept_uuid is not None else str(uuid_module.uuid4())
+            self.subsymbolic = np.asarray(subsymbolic, dtype=np.float64) if subsymbolic is not None else np.random.randn(64)
+            self.symbolic = symbolic or []
+            self.causal_graph = causal_graph or CausalGraph()
+            self.sophia_score = sophia_score
+            self.dark_wisdom_density = dark_wisdom_density
+            self.paradox_intensity = paradox_intensity
+            self.chronon_entanglement = chronon_entanglement
+            self.biophoton_amplitude = biophoton_amplitude
+            self.z3_phase = z3_phase
+            self.retrocausal_kernel = retrocausal_kernel if retrocausal_kernel is not None else np.random.randn(10) * 0.1
+        def distance(self, other):
+            return np.linalg.norm(self.subsymbolic - other.subsymbolic)
+        def to_text(self):
+            return f"Concept(sophia={self.sophia_score:.3f})"
 
     def rne_project_to_ball(v, eps=1e-8):
         v = np.asarray(v, dtype=np.float64)
@@ -849,7 +852,7 @@ class HyperCrystal:
                 biophoton_amplitude=random.uniform(0.3, 0.5),
                 z3_phase=random.choice(Z3_ROOTS),
                 retrocausal_kernel=np.random.randn(10) * 0.1,
-                uuid=str(uuid.uuid4())
+                concept_uuid=str(uuid_module.uuid4())  # use concept_uuid
             )
             self.state.concepts.append(c)
             self.state.rne_context.add_to_memory(c)
@@ -1302,7 +1305,7 @@ class HyperCrystal:
                     biophoton_amplitude=np.clip(base.biophoton_amplitude + mutation_rate * np.random.randn(), 0, 1),
                     z3_phase=base.z3_phase,
                     retrocausal_kernel=base.retrocausal_kernel + mutation_rate * np.random.randn(*base.retrocausal_kernel.shape),
-                    uuid=str(uuid.uuid4())
+                    concept_uuid=str(uuid_module.uuid4())  # use concept_uuid
                 )
                 fields = [("sophia", new_c.sophia_score), ("wisdom", new_c.dark_wisdom_density), ("paradox", new_c.paradox_intensity)]
                 dominant = max(fields, key=lambda x: x[1])[0]
@@ -1343,7 +1346,9 @@ class HyperCrystal:
         with self._lock:
             if goal_vector is None:
                 goal_vector = self.state.global_goal
-            concept.uuid = str(uuid.uuid4())
+            # Ensure concept has a UUID
+            if not hasattr(concept, 'uuid') or concept.uuid is None:
+                concept.uuid = str(uuid_module.uuid4())
             self.state.concepts.append(concept)
             self.state.rne_context.add_to_memory(concept)
             self.qhdram.store(f"concept_{concept.uuid}", concept.subsymbolic)
