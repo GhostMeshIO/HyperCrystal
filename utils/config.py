@@ -20,8 +20,10 @@ DEFAULT_CONFIG = {
     "admin_api_key": None   # will be generated
 }
 
+# utils/config.py (partial update – replace the ensure_config function)
+
 def ensure_config(config_path: str = "hypercrystal_config.json"):
-    """Create a default config file if it doesn't exist."""
+    """Create a default config file if it doesn't exist, or fill missing admin_api_key."""
     if not Path(config_path).exists():
         config = DEFAULT_CONFIG.copy()
         config["admin_api_key"] = secrets.token_urlsafe(32)
@@ -30,7 +32,13 @@ def ensure_config(config_path: str = "hypercrystal_config.json"):
         print(f"Created default configuration at {config_path}")
         print(f"Admin API key: {config['admin_api_key']}")
     else:
-        print(f"Configuration already exists at {config_path}")
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        if "admin_api_key" not in config or not config["admin_api_key"]:
+            config["admin_api_key"] = secrets.token_urlsafe(32)
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            print(f"Added missing admin_api_key to {config_path}")
 
 if __name__ == "__main__":
     ensure_config()
