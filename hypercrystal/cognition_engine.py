@@ -1,7 +1,7 @@
 """
-cognition_engine.py – Intelligence & Novelty for HyperCrystal (Revised v2.0)
+cognition_engine.py – Intelligence & Novelty for HyperCrystal (Revised v2.1)
 ===========================================================================
-Fully compatible with the revised core_engine.py.
+Fully compatible with the revised core_engine.py (UUID-based, thread‑safe).
 Implements diffusion novelty injection, CMA‑ES meta‑learning, repulsion force,
 and emergence detection with persistent homology.
 """
@@ -167,7 +167,7 @@ class DiffusionNoveltyInjector:
         self.step_count += 1
 
 # -----------------------------------------------------------------------------
-# MetaLearner – with CMA‑ES
+# MetaLearner – with CMA‑ES (updated for UUIDs)
 # -----------------------------------------------------------------------------
 class MetaLearner:
     """Recursive self‑evaluation, meta‑learning, and self‑improvement."""
@@ -344,6 +344,7 @@ class MetaLearner:
         self.meta_params["mutation_rate"] = max(0.01, self.meta_params["mutation_rate"] * 0.5)
         self.active_strategy = "balance"
         if self.rollback_state is not None:
+            # Rollback is a full copy of the state; assign safely
             self.crystal.state = self.rollback_state
 
     def switch_strategy(self):
@@ -399,6 +400,7 @@ class MetaLearner:
                 retrocausal_kernel=np.mean([c.retrocausal_kernel for c in cluster_concepts], axis=0)
                     if cluster_concepts[0].retrocausal_kernel is not None else None
             )
+            # store_concept now returns UUID; we ignore it
             self.crystal.store_concept(new_concept, goal=self.crystal.state.global_goal)
 
     def run_benchmark(self):
@@ -484,7 +486,7 @@ class MetaLearner:
             print(f"[Meta] Improvement score: {self.improvement_score():.3f}, Efficiency: {self.get_efficiency_score():.3f}")
 
 # -----------------------------------------------------------------------------
-# RepulsionForce – uses ANN or fallback
+# RepulsionForce – uses ANN or fallback (works with UUIDs because it uses list indices)
 # -----------------------------------------------------------------------------
 class RepulsionForce:
     def __init__(self, crystal: HyperCrystal, config: dict):
@@ -532,7 +534,7 @@ class RepulsionForce:
                         )
 
 # -----------------------------------------------------------------------------
-# EmergenceDetector – with persistent homology
+# EmergenceDetector – with persistent homology (updated for UUIDs)
 # -----------------------------------------------------------------------------
 class EmergenceDetector:
     def __init__(self, config: dict):
@@ -585,25 +587,33 @@ class EmergenceDetector:
         return self.consecutive_stable >= self.stagnation_threshold
 
     def creative_destruction(self, crystal: HyperCrystal) -> None:
+        """Remove the lowest-fitness fraction of concepts, using UUIDs."""
         n_remove = int(len(crystal.state.concepts) * self.creative_destruction_fraction)
         if n_remove <= 0:
             return
-        indices = list(range(len(crystal.state.concepts)))
-        indices.sort(key=lambda i: crystal.state.concept_fitness.get(i, 0.0))
-        indices_to_remove = set(indices[:n_remove])
-        new_concepts = []
-        new_fitness = {}
-        for i, c in enumerate(crystal.state.concepts):
-            if i not in indices_to_remove:
-                new_idx = len(new_concepts)
-                new_concepts.append(c)
-                new_fitness[new_idx] = crystal.state.concept_fitness.get(i, 0.5)
+
+        # Get list of (uuid, fitness) for all concepts
+        uuid_fitness = [(c.uuid, crystal.state.concept_fitness.get(c.uuid, 0.0)) for c in crystal.state.concepts]
+        # Sort by fitness (lowest first)
+        uuid_fitness.sort(key=lambda x: x[1])
+        remove_uuids = {uuid for uuid, _ in uuid_fitness[:n_remove]}
+
+        # Keep only concepts not in remove_uuids
+        new_concepts = [c for c in crystal.state.concepts if c.uuid not in remove_uuids]
+
+        # Update state
         crystal.state.concepts = new_concepts
-        crystal.state.concept_fitness = new_fitness
-        crystal.state.ann_embeddings = [c.subsymbolic for c in new_concepts]
-        crystal._update_ann_index()
-        if hasattr(crystal, '_update_pareto_front'):
-            crystal._update_pareto_front()
+        # Remove metadata for evicted UUIDs
+        for uuid in remove_uuids:
+            crystal.state.concept_goals.pop(uuid, None)
+            crystal.state.concept_fitness.pop(uuid, None)
+            crystal.state.concept_rewards.pop(uuid, None)
+        # Update Pareto front (filter out removed UUIDs)
+        crystal.state.concept_pareto_front = [uuid for uuid in crystal.state.concept_pareto_front if uuid not in remove_uuids]
+
+        # Rebuild ANN index and Pareto front
+        crystal._rebuild_ann_index()
+        crystal._update_pareto_front()
         self.triggered_destruction = True
 
     def step(self, crystal: HyperCrystal) -> None:
@@ -614,7 +624,7 @@ class EmergenceDetector:
             self.triggered_destruction = False
 
 # -----------------------------------------------------------------------------
-# CognitionEngine – orchestrator
+# CognitionEngine – orchestrator (no changes needed, already uses UUID-compatible methods)
 # -----------------------------------------------------------------------------
 class CognitionEngine:
     def __init__(self, crystal: HyperCrystal):
@@ -655,7 +665,7 @@ class CognitionEngine:
                       f"fitness={metrics.get('avg_fitness',0):.3f}, strategy={self.meta_learner.active_strategy}")
 
 # -----------------------------------------------------------------------------
-# Add missing _fast_novelty method to HyperCrystal (monkey patch)
+# Add missing _fast_novelty method to HyperCrystal (monkey patch) – updated for UUIDs
 # -----------------------------------------------------------------------------
 def _fast_novelty(self, concept: Concept) -> float:
     """Compute novelty as 1 - maximum similarity to existing concepts."""
