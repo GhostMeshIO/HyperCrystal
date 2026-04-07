@@ -11,12 +11,12 @@ Enhanced with:
 - Proper goal assignment for new concepts
 - Placeholder for goal steering learning
 
-Fixes applied:
-- #008: Concept UUIDs replace list indices in all dictionaries
+Fixes applied (Phase 1):
+- #006, #008: UUID-based stable indexing for all concept metadata
 - #010: project_to_ball guards against near-zero vectors
-- #011: Threading locks (RLock) for state mutations
+- #011: Threading locks (RLock) for all state mutations
 - #053: Stable concept identification via UUID
-- #FIX: Fallback Concept class no longer shadows `uuid` module
+- Convergence spam: adaptive meta-depth increase, less aggressive
 """
 
 import json
@@ -215,10 +215,10 @@ def load_config(config_path: str = "hypercrystal_config.json") -> dict:
         "swarm_agents": 30,
         "tda_enabled": True,
         "verbose": True,
-        "sophia_attractor_strength": 0.2,
-        "convergence_threshold": 0.05,
-        "convergence_steps": 3,
-        "paradox_rise_rate": 0.02,
+        "sophia_attractor_strength": 0.08,   # reduced from 0.2 to reduce convergence spam
+        "convergence_threshold": 0.08,       # increased to make it less sensitive
+        "convergence_steps": 5,              # require more steps before meta_depth increase
+        "paradox_rise_rate": 0.03,           # slightly increased for faster paradox rise
         "max_meta_depth": 10,
         "min_meta_depth": 1,
         "checkpoint_dir": "checkpoints",
@@ -827,9 +827,10 @@ class HyperCrystal:
         self.resource_monitor = ResourceMonitor(self.config)
         self.api_gateway = APIGateway(self.resource_monitor, self.config)
 
-        # Convergence tracking
+        # Convergence tracking (adaptive)
         self.prev_sophia = SOPHIA_POINT
         self.convergence_counter = 0
+        self.last_meta_increase_step = 0
 
         # Goal steering model placeholder
         self._goal_steering_model = None
@@ -869,17 +870,18 @@ class HyperCrystal:
     # -------------------------------------------------------------------------
     def _rebuild_ann_index(self):
         """Build or rebuild the approximate nearest neighbor index."""
-        if not HAS_SKLEARN or len(self.state.concepts) < 2:
-            self.state.ann_index = None
-            return
-        embeddings = np.vstack([c.subsymbolic for c in self.state.concepts])
-        try:
-            self.state.ann_index = NearestNeighbors(n_neighbors=5, metric='euclidean')
-            self.state.ann_index.fit(embeddings)
-            self.state.ann_index_built_at_step = self.state.step
-        except Exception as e:
-            warnings.warn(f"Failed to build ANN index: {e}")
-            self.state.ann_index = None
+        with self._lock:
+            if not HAS_SKLEARN or len(self.state.concepts) < 2:
+                self.state.ann_index = None
+                return
+            embeddings = np.vstack([c.subsymbolic for c in self.state.concepts])
+            try:
+                self.state.ann_index = NearestNeighbors(n_neighbors=5, metric='euclidean')
+                self.state.ann_index.fit(embeddings)
+                self.state.ann_index_built_at_step = self.state.step
+            except Exception as e:
+                warnings.warn(f"Failed to build ANN index: {e}")
+                self.state.ann_index = None
 
     def _fast_novelty(self, concept: Concept) -> float:
         """Compute novelty using ANN index if available, else linear scan."""
@@ -1120,7 +1122,7 @@ class HyperCrystal:
             concept.subsymbolic = project_to_ball(concept.subsymbolic + delta_emb)
 
     # -------------------------------------------------------------------------
-    # Metrics update (robust, uses UUIDs)
+    # Metrics update (robust, uses UUIDs) – FIXED CONVERGENCE SPAM
     # -------------------------------------------------------------------------
     def _update_metrics(self) -> None:
         if len(self.state.concepts) > 0:
@@ -1182,7 +1184,7 @@ class HyperCrystal:
         self.state.spiritual_score = 0.5 + 0.3 * self.state.non_hermitian_term + 0.2 * (self.state.meta_depth / self.config.get("max_meta_depth", 10))
         self.state.spiritual_score = np.clip(self.state.spiritual_score, 0.0, 1.0)
 
-        if self.state.concepts and self.config.get("sophia_attractor_strength", 0.2) > 0:
+        if self.state.concepts and self.config.get("sophia_attractor_strength", 0.08) > 0:
             embeddings = np.vstack([c.subsymbolic for c in self.state.concepts])
             sophia_scores = np.array([c.sophia_score for c in self.state.concepts])
             new_embs = batch_sophia_geodesic_flow(embeddings, sophia_scores, step=self.config["sophia_attractor_strength"])
@@ -1191,22 +1193,34 @@ class HyperCrystal:
                 c.sophia_score = max(0.0, min(1.0, c.sophia_score + self.config["sophia_attractor_strength"] * (SOPHIA_POINT - c.sophia_score)))
             self.state.sophia_score = np.mean([c.sophia_score for c in self.state.concepts])
 
+        # --- Adaptive convergence detection (reduces spam) ---
         diff = abs(self.state.sophia_score - SOPHIA_POINT)
+        # Only increase meta_depth if we have been near Sophia for many steps AND meta_depth is not already high
         if diff < self.config["convergence_threshold"]:
             self.convergence_counter += 1
         else:
             self.convergence_counter = 0
-        if self.convergence_counter >= self.config["convergence_steps"]:
-            self.state.meta_depth = min(self.config["max_meta_depth"], self.state.meta_depth + 0.5)
+
+        # Increase meta_depth only if:
+        # 1. Convergence counter exceeds required steps
+        # 2. We haven't increased meta_depth in the last 20 steps (prevents rapid successive increases)
+        # 3. meta_depth is below max
+        if (self.convergence_counter >= self.config["convergence_steps"] and 
+            (self.state.step - self.last_meta_increase_step) > 20 and 
+            self.state.meta_depth < self.config["max_meta_depth"]):
+            self.state.meta_depth = min(self.config["max_meta_depth"], self.state.meta_depth + 0.3)  # smaller increment
             self.convergence_counter = 0
+            self.last_meta_increase_step = self.state.step
             if self.config["verbose"]:
-                print("[Convergence] System near Sophia point. Increasing meta_depth.")
+                print(f"[Convergence] System near Sophia point. Increasing meta_depth to {self.state.meta_depth:.2f}")
 
+        # Adaptive mutation rate based on Sophia proximity
         if diff < 0.1:
-            self.state.rne_context.params["mutation_rate"] = max(0.02, self.state.rne_context.params.get("mutation_rate", 0.1) * 0.95)
+            self.state.rne_context.params["mutation_rate"] = max(0.02, self.state.rne_context.params.get("mutation_rate", 0.1) * 0.98)
         else:
-            self.state.rne_context.params["mutation_rate"] = min(0.2, self.state.rne_context.params.get("mutation_rate", 0.1) * 1.02)
+            self.state.rne_context.params["mutation_rate"] = min(0.2, self.state.rne_context.params.get("mutation_rate", 0.1) * 1.01)
 
+        # Paradox rise/fall based on meta_depth (encourage creativity when stuck)
         if self.state.meta_depth < 2:
             self.state.paradox_intensity = min(0.8, self.state.paradox_intensity + self.config["paradox_rise_rate"])
         else:
@@ -1226,32 +1240,33 @@ class HyperCrystal:
 
     def _evict_by_fitness(self):
         """Remove low-fitness concepts when capacity is exceeded."""
-        capacity = self.config["memory_capacity"]
-        if len(self.state.concepts) <= capacity:
-            return
-        # Sort by fitness (lowest first)
-        concepts_with_fitness = [(c, self.state.concept_fitness.get(c.uuid, 0.0)) for c in self.state.concepts]
-        concepts_with_fitness.sort(key=lambda x: x[1])
-        evict_count = len(self.state.concepts) - capacity
-        evict_uuids = set(c.uuid for c, _ in concepts_with_fitness[:evict_count])
+        with self._lock:
+            capacity = self.config["memory_capacity"]
+            if len(self.state.concepts) <= capacity:
+                return
+            # Sort by fitness (lowest first)
+            concepts_with_fitness = [(c, self.state.concept_fitness.get(c.uuid, 0.0)) for c in self.state.concepts]
+            concepts_with_fitness.sort(key=lambda x: x[1])
+            evict_count = len(self.state.concepts) - capacity
+            evict_uuids = set(c.uuid for c, _ in concepts_with_fitness[:evict_count])
 
-        # Keep only non-evicted concepts
-        new_concepts = []
-        for c in self.state.concepts:
-            if c.uuid not in evict_uuids:
-                new_concepts.append(c)
-        self.state.concepts = new_concepts
+            # Keep only non-evicted concepts
+            new_concepts = []
+            for c in self.state.concepts:
+                if c.uuid not in evict_uuids:
+                    new_concepts.append(c)
+            self.state.concepts = new_concepts
 
-        # Remove metadata for evicted UUIDs
-        for uuid in evict_uuids:
-            self.state.concept_goals.pop(uuid, None)
-            self.state.concept_fitness.pop(uuid, None)
-            self.state.concept_rewards.pop(uuid, None)
-        # Update Pareto front (remove evicted UUIDs)
-        self.state.concept_pareto_front = [uuid for uuid in self.state.concept_pareto_front if uuid not in evict_uuids]
+            # Remove metadata for evicted UUIDs
+            for uuid in evict_uuids:
+                self.state.concept_goals.pop(uuid, None)
+                self.state.concept_fitness.pop(uuid, None)
+                self.state.concept_rewards.pop(uuid, None)
+            # Update Pareto front (remove evicted UUIDs)
+            self.state.concept_pareto_front = [uuid for uuid in self.state.concept_pareto_front if uuid not in evict_uuids]
 
-        self._update_pareto_front()
-        self._rebuild_ann_index()
+            self._update_pareto_front()
+            self._rebuild_ann_index()
 
     # -------------------------------------------------------------------------
     # Internal step (thread-safe)
