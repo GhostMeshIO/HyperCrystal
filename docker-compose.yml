@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  HyperCrystal:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - DEBUG=False
+      - DASH_SECRET_KEY=your-secret-key-change-me
+      - JWT_SECRET=your-jwt-secret-change-me
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./users.json:/app/users.json
+      - ./HyperCrystal_config.json:/app/HyperCrystal_config.json
+    restart: unless-stopped
+
+  # Optional Redis for SocketIO message queue (for multiple workers)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped

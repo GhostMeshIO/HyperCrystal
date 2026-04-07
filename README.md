@@ -13,8 +13,8 @@ An AI system for generating, exploring, and optimizing concepts in a multi‑dim
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/hypercrystal.git
-cd hypercrystal
+git clone https://github.com/GhostMeshIO/HyperCrystal.git
+cd HyperCrystal
 
 # Recommended: use virtualenv
 python -m venv .venv
@@ -26,7 +26,7 @@ pip install -r requirements.txt
 python run.py --steps 50 --verbose --report business_plan
 
 # Start the dashboard
-python hypercrystal/dashboard/hypercrystal_dash.py
+python HyperCrystal/dashboard/HyperCrystal_dash.py
 
 # Or start full API server
 python run.py --serve-api --host 0.0.0.0 --port 5000

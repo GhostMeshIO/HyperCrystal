@@ -18,4 +18,4 @@ COPY . .
 EXPOSE 5000
 
 # Default command: run the dashboard
-CMD ["python", "hypercrystal/dashboard/hypercrystal_dash.py"]
+CMD ["python", "HyperCrystal/dashboard/HyperCrystal_dash.py"]
