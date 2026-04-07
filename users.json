@@ -1,0 +1,12 @@
+{
+  "admin": {
+    "password": "admin",
+    "role": "admin",
+    "credits": 1000
+  },
+  "guest": {
+    "password": "guest",
+    "role": "guest",
+    "credits": 100
+  }
+}

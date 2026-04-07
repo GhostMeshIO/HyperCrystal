@@ -1,0 +1,83 @@
+{
+  "seed": 42,
+  "volume_cm3": 1.0,
+  "steps": 100,
+  "checkpoint_interval": 10,
+  "use_llm": false,
+  "llm_providers": {
+    "deepseek": true
+  },
+  "task_provider_mapping": {
+    "generation": "deepseek",
+    "validation": "deepseek",
+    "summarization": "deepseek",
+    "reflection": "deepseek"
+  },
+  "embedding_dim": 128,
+  "fractal_scale": 0.618,
+  "retrocausal_strength": 0.1,
+  "non_hermitian_gamma": 0.1,
+  "stp_pruning": true,
+  "memory_capacity": 10000,
+  "swarm_agents": 30,
+  "tda_enabled": true,
+  "verbose": true,
+  "sophia_attractor_strength": 0.2,
+  "convergence_threshold": 0.05,
+  "convergence_steps": 3,
+  "paradox_rise_rate": 0.02,
+  "max_meta_depth": 10,
+  "min_meta_depth": 1,
+  "checkpoint_dir": "checkpoints",
+  "rate_limit": 100,
+  "subscription_tiers": {
+    "free": {
+      "concepts": 100,
+      "queries_per_day": 50,
+      "price_usd": 0,
+      "initial_credits": 100
+    },
+    "pro": {
+      "concepts": 10000,
+      "queries_per_day": 5000,
+      "price_usd": 29,
+      "initial_credits": 1000
+    },
+    "enterprise": {
+      "concepts": 100000,
+      "queries_per_day": 100000,
+      "price_usd": 199,
+      "initial_credits": 10000
+    }
+  },
+  "api_key_prefix": "hc_",
+  "goal_learning_rate": 0.05,
+  "reward_decay": 0.95,
+  "fitness_weights": {
+    "sophia": 1.0,
+    "dark_wisdom": 1.0,
+    "paradox": 0.5,
+    "goal_alignment": 1.0
+  },
+  "goal_conditioned_embedding": true,
+  "goal_history_length": 10,
+  "embedding_steering_strength": 0.02,
+  "pareto_front_size": 100,
+  "subgoal_depth": 3,
+  "conflict_threshold": 0.3,
+  "soa_enabled": true,
+  "quantization_bits": 8,
+  "mmd_threshold": 0.1,
+  "repulsion_strength": 0.02,
+  "gradient_tau": 1.0,
+  "ann_update_interval": 10,
+  "novelty_acceptance_threshold": 0.08,
+  "min_mutation_rate": 0.08,
+  "max_mutation_rate": 0.35,
+  "stagnation_threshold": 10,
+  "mutation_rate_base": 0.15,
+  "burst_probability": 0.12,
+  "burst_factor": 3.5,
+  "diffusion_denoise_alpha": 0.9,
+  "admin_api_key": "change_this_before_deployment"
+}
