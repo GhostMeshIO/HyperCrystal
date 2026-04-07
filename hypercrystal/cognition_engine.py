@@ -1,12 +1,9 @@
 """
-cognition_engine.py – Intelligence & Novelty for the HyperCrystal / QNVM (v2.0)
-======================================================================
-Complete implementation of all cognitive mechanisms with advanced enhancements:
-- Diffusion‑based novelty injection (replaces mutation bursts)
-- CMA‑ES meta‑learning for hyperparameter evolution
-- Repulsion force for diversity maintenance (Equation 8)
-- Emergence detection with persistent homology (optional)
-- All O(n²) novelty computations replaced by ANN index from core_engine
+cognition_engine.py – Intelligence & Novelty for HyperCrystal (Revised v2.0)
+===========================================================================
+Fully compatible with the revised core_engine.py.
+Implements diffusion novelty injection, CMA‑ES meta‑learning, repulsion force,
+and emergence detection with persistent homology.
 """
 
 import numpy as np
@@ -21,20 +18,22 @@ from typing import List, Dict, Tuple, Optional, Any, Set
 from dataclasses import dataclass, field
 from collections import deque, defaultdict
 
-# Import core engine components
+# Import core engine components (absolute import)
 try:
-    from core_engine import (HyperCrystal, Concept, GoalField, mobius_distance,
-                             project_to_ball, SOPHIA_POINT, PHI_INV, Z3_ROOTS,
-                             EPS, DEFAULT_DIM, load_config, geodesic_interpolation,
-                             z3_symmetric_blend)
-except ImportError:
-    raise ImportError("core_engine module not found. Ensure core_engine.py is in the same directory.")
+    from hypercrystal.core_engine import (
+        HyperCrystal, Concept, GoalField, mobius_distance, project_to_ball
+    )
+except ImportError as e:
+    raise ImportError(f"Failed to import from hypercrystal.core_engine: {e}")
 
-# Import safe clustering helpers from utils – with fallback
+# Constants
+EPS = 1e-8
+
+# Import safe clustering helpers – with fallback
 try:
     from utils import safe_kmeans, safe_cluster_indices
 except ImportError:
-    # Fallback if utils not available – define simple wrappers
+    # Simple fallback implementations
     def safe_kmeans(embeddings, n_clusters=None):
         try:
             from sklearn.cluster import KMeans
@@ -73,7 +72,7 @@ try:
 except ImportError:
     HAS_GUDHI = False
 
-# For mutual information estimation (optional)
+# For mutual information (optional)
 try:
     from sklearn.feature_selection import mutual_info_regression
     HAS_SKLEARN = True
@@ -81,14 +80,14 @@ except ImportError:
     HAS_SKLEARN = False
 
 # -----------------------------------------------------------------------------
-# Novelty Registry (enhanced to use ANN)
+# Novelty Registry (using ANN via core_engine)
 # -----------------------------------------------------------------------------
 class NoveltyRegistry:
     """Keeps track of generated concepts and their novelty scores."""
     def __init__(self, capacity: int = 1000):
         self.capacity = capacity
         self.concept_hashes: Set[int] = set()
-        self.novelty_scores: Dict[int, float] = {}  # hash -> novelty
+        self.novelty_scores: Dict[int, float] = {}
         self.history: deque = deque(maxlen=capacity)
 
     def hash_concept(self, concept: Concept) -> int:
@@ -97,7 +96,7 @@ class NoveltyRegistry:
         return hash((emb_hash, sym_hash))
 
     def compute_novelty(self, concept: Concept, crystal: HyperCrystal) -> float:
-        """Use core's fast novelty (which uses ANN index)."""
+        """Use core's fast novelty (uses ANN index)."""
         return crystal._fast_novelty(concept)
 
     def register(self, concept: Concept, novelty: float) -> None:
@@ -109,49 +108,38 @@ class NoveltyRegistry:
     def is_novel(self, concept: Concept) -> bool:
         return self.hash_concept(concept) not in self.concept_hashes
 
-
 # -----------------------------------------------------------------------------
-# DiffusionNoveltyInjector – Replaces mutation bursts
+# DiffusionNoveltyInjector
 # -----------------------------------------------------------------------------
 class DiffusionNoveltyInjector:
-    """
-    Generates new concepts by adding noise to existing concepts and then
-    denoising using a learned denoiser. This replaces the old mutation burst
-    mechanism.
-    """
+    """Generates new concepts by denoising noisy copies of existing ones."""
     def __init__(self, crystal: HyperCrystal, config: dict):
         self.crystal = crystal
         self.config = config
         self.diffusion_steps = config.get("diffusion_steps", 100)
         self.beta_schedule = np.linspace(1e-4, 0.02, self.diffusion_steps)
-        self.denoiser = None  # Will be a small neural network later; for now a simple average
+        self.denoiser = None
         self.step_count = 0
 
     def step(self):
-        """Generate new concepts using diffusion."""
         if len(self.crystal.state.concepts) < 2:
             return
         base = random.choice(self.crystal.state.concepts)
         t = random.randint(1, self.diffusion_steps - 1)
-        # Scale noise by adaptive mutation rate, not just beta schedule
         mutation_rate = self.config.get("mutation_rate_base", 0.15)
         burst_prob = self.config.get("burst_probability", 0.12)
         burst_factor = self.config.get("burst_factor", 3.5)
         effective_rate = mutation_rate * burst_factor if np.random.rand() < burst_prob else mutation_rate
         noise = np.random.randn(*base.subsymbolic.shape) * effective_rate
         noisy = base.subsymbolic + noise
-        # Simplified denoising: blend with original
-        # Less regression to parent: allow diffused concepts to be more distinct
         alpha = self.config.get("diffusion_denoise_alpha", 0.9)
         denoised = alpha * noisy + (1 - alpha) * base.subsymbolic
         denoised = project_to_ball(denoised)
 
-        # Determine dominant field for naming
-        # We need a temporary concept to compute fields
-        # Let's create a temporary concept with the denoised embedding and mutated fields
+        # Create temporary concept for field values
         new_c = Concept(
             subsymbolic=denoised,
-            symbolic=[],  # temporary
+            symbolic=[],
             causal_graph=base.causal_graph.copy() if base.causal_graph else None,
             sophia_score=np.clip(base.sophia_score + effective_rate * np.random.randn(), 0, 1),
             dark_wisdom_density=np.clip(base.dark_wisdom_density + effective_rate * np.random.randn(), 0, 1),
@@ -160,6 +148,7 @@ class DiffusionNoveltyInjector:
             biophoton_amplitude=np.clip(base.biophoton_amplitude + effective_rate * np.random.randn(), 0, 1),
             z3_phase=base.z3_phase,
             retrocausal_kernel=base.retrocausal_kernel + effective_rate * np.random.randn(*base.retrocausal_kernel.shape)
+                if base.retrocausal_kernel is not None else None
         )
         # Build symbolic name
         fields = [("sophia", new_c.sophia_score),
@@ -171,22 +160,17 @@ class DiffusionNoveltyInjector:
             parent_root = base.symbolic[1] if len(base.symbolic) > 1 else "concept"
         new_c.symbolic = [f"diff_{dominant}_{self.step_count}", parent_root]
 
-        # Apply novelty gate before storing
         novelty_threshold = self.config.get("novelty_acceptance_threshold", 0.08)
         novelty = self.crystal._fast_novelty(new_c)
         if novelty >= novelty_threshold:
-            self.crystal.store_concept(new_c, goal_vector=self.crystal.state.global_goal)
+            self.crystal.store_concept(new_c, goal=self.crystal.state.global_goal)
         self.step_count += 1
 
-
 # -----------------------------------------------------------------------------
-# MetaLearner – Enhanced with CMA‑ES (fixed)
+# MetaLearner – with CMA‑ES
 # -----------------------------------------------------------------------------
 class MetaLearner:
-    """
-    Recursive self‑evaluation, meta‑learning, and self‑improvement.
-    Implements all required mechanisms, now with CMA‑ES.
-    """
+    """Recursive self‑evaluation, meta‑learning, and self‑improvement."""
     def __init__(self, crystal: HyperCrystal, config: dict):
         self.crystal = crystal
         self.config = config
@@ -214,7 +198,7 @@ class MetaLearner:
         self.heuristics = {}
         self.failure_modes = {}
 
-        # CMA‑ES initialization (fixed)
+        # CMA‑ES initialization
         self.cma = None
         self.param_keys = ['mutation_rate', 'sophia_attractor_strength', 'goal_learning_rate']
         if HAS_CMA and config.get("use_cma_es", True):
@@ -222,8 +206,8 @@ class MetaLearner:
             try:
                 self.cma = cma.CMAEvolutionStrategy(
                     initial_params,
-                    0.1,  # initial sigma
-                    {'maxiter': 50, 'verbose': -1, 'popsize': 4}  # small popsize for speed
+                    0.1,
+                    {'maxiter': 50, 'verbose': -1, 'popsize': 4}
                 )
                 self.cma_iteration = 0
             except Exception as e:
@@ -232,7 +216,7 @@ class MetaLearner:
 
     def evaluate_performance(self) -> float:
         metrics = self.crystal.get_metrics()
-        score = (1.0 - metrics["triple_point"]) + metrics["holo_entropy"] + metrics["dark_wisdom"]
+        score = (1.0 - metrics.get("triple_point", 0.5)) + metrics.get("holo_entropy", 0.5) + metrics.get("dark_wisdom", 0.5)
         diversity = min(1.0, metrics["concept_count"] / self.crystal.config["memory_capacity"])
         score += diversity * 0.5
         avg_fitness = metrics.get("avg_fitness", 0.5)
@@ -243,19 +227,20 @@ class MetaLearner:
         base_score = self.evaluate_performance()
         if depth <= 0:
             return base_score
-        consistency = 1.0 - np.std(list(self.crystal.state.concept_fitness.values())) if self.crystal.state.concept_fitness else 0.5
+        fitness_vals = list(self.crystal.state.concept_fitness.values())
+        consistency = 1.0 - np.std(fitness_vals) if fitness_vals else 0.5
         return base_score * (0.7 + 0.3 * consistency)
 
     def build_self_model(self) -> np.ndarray:
         metrics = self.crystal.get_metrics()
         return np.array([
-            metrics["sophia"],
-            metrics["dark_wisdom"],
-            metrics["paradox"],
-            metrics["triple_point"],
-            metrics["meta_depth"],
-            metrics["non_hermitian"],
-            metrics["avg_fitness"],
+            metrics.get("sophia", 0.5),
+            metrics.get("dark_wisdom", 0.5),
+            metrics.get("paradox", 0.5),
+            metrics.get("triple_point", 0.5),
+            metrics.get("meta_depth", 1),
+            metrics.get("non_hermitian", 0.1),
+            metrics.get("avg_fitness", 0.5),
             len(self.crystal.state.concepts) / self.crystal.config["memory_capacity"],
         ])
 
@@ -304,56 +289,35 @@ class MetaLearner:
                 if np.any(np.isnan(c.subsymbolic)):
                     c.subsymbolic = project_to_ball(np.random.randn(self.crystal.config["embedding_dim"]))
 
-    # -------------------------------------------------------------------------
-    # Fixed CMA‑ES evolution
-    # -------------------------------------------------------------------------
     def evolve_parameters(self):
-        """Use CMA-ES to optimize meta-parameters (fixed)."""
         if not HAS_CMA or self.cma is None:
             return
-        # Run every 50 steps
         if self.crystal.state.step % 50 != 0:
             return
-
-        # Get candidates from CMA-ES
         try:
-            # Ask for a set of candidates (list of parameter vectors)
             candidates = self.cma.ask()
-            # For the first iteration, candidates is a list of 1 vector; later it's popsize vectors
-            # Evaluate each candidate
             scores = []
             for candidate in candidates:
-                # Temporarily set meta-parameters to candidate
                 old_params = {k: self.meta_params[k] for k in self.param_keys}
                 for i, key in enumerate(self.param_keys):
                     self.meta_params[key] = candidate[i]
                     self.crystal.config[key] = candidate[i]
-                # Evaluate performance
                 score = self.evaluate_performance()
                 scores.append(score)
-                # Restore old parameters
                 for key, val in old_params.items():
                     self.meta_params[key] = val
                     self.crystal.config[key] = val
-            # Tell CMA-ES the results
             self.cma.tell(candidates, scores)
             self.cma_iteration += 1
-
-            # After enough iterations, apply best solution
             if self.cma_iteration > 20 and self.cma.result.xbest is not None:
                 best = self.cma.result.xbest
                 for i, key in enumerate(self.param_keys):
                     self.meta_params[key] = best[i]
                     self.crystal.config[key] = best[i]
-                # Reset CMA to avoid continuous drift? optional
         except Exception as e:
-            # If CMA fails, disable it
             warnings.warn(f"CMA-ES error: {e}. Disabling.")
             self.cma = None
 
-    # -------------------------------------------------------------------------
-    # Remaining methods (unchanged)
-    # -------------------------------------------------------------------------
     def compression_score(self, concept: Concept) -> float:
         emb_entropy = -np.sum(np.abs(concept.subsymbolic) * np.log(np.abs(concept.subsymbolic) + EPS))
         sym_length = len(concept.symbolic)
@@ -433,8 +397,9 @@ class MetaLearner:
                 biophoton_amplitude=np.mean([c.biophoton_amplitude for c in cluster_concepts]),
                 z3_phase=cluster_concepts[0].z3_phase,
                 retrocausal_kernel=np.mean([c.retrocausal_kernel for c in cluster_concepts], axis=0)
+                    if cluster_concepts[0].retrocausal_kernel is not None else None
             )
-            self.crystal.store_concept(new_concept, goal_vector=self.crystal.state.global_goal)
+            self.crystal.store_concept(new_concept, goal=self.crystal.state.global_goal)
 
     def run_benchmark(self):
         if self.crystal.state.step - self.last_benchmark_step < self.benchmark_interval:
@@ -518,15 +483,10 @@ class MetaLearner:
         if self.crystal.state.step % 100 == 0:
             print(f"[Meta] Improvement score: {self.improvement_score():.3f}, Efficiency: {self.get_efficiency_score():.3f}")
 
-
 # -----------------------------------------------------------------------------
-# RepulsionForce – Implements Equation 8
+# RepulsionForce – uses ANN or fallback
 # -----------------------------------------------------------------------------
 class RepulsionForce:
-    """
-    Applies a repulsive force between concepts that are too close,
-    promoting diversity.
-    """
     def __init__(self, crystal: HyperCrystal, config: dict):
         self.crystal = crystal
         self.config = config
@@ -534,37 +494,47 @@ class RepulsionForce:
         self.threshold = config.get("repulsion_threshold", 0.2)
 
     def step(self):
-        if self.crystal.state.ann_index is None:
+        n = len(self.crystal.state.concepts)
+        if n < 2:
             return
-        embeddings = np.vstack([c.subsymbolic for c in self.crystal.state.concepts])
-        distances, indices = self.crystal.state.ann_index.radius_neighbors(embeddings, radius=self.threshold)
-        for i, neighs in enumerate(indices):
-            if len(neighs) == 0:
-                continue
-            for j in neighs:
-                if j <= i:
-                    continue
-                diff = self.crystal.state.concepts[i].subsymbolic - self.crystal.state.concepts[j].subsymbolic
-                norm = np.linalg.norm(diff)
-                if norm < 1e-8:
-                    continue
-                force = self.strength * diff / norm
-                self.crystal.state.concepts[i].subsymbolic = project_to_ball(
-                    self.crystal.state.concepts[i].subsymbolic + force
-                )
-                self.crystal.state.concepts[j].subsymbolic = project_to_ball(
-                    self.crystal.state.concepts[j].subsymbolic - force
-                )
-
+        # Try to use radius_neighbors if available (sklearn)
+        if hasattr(self.crystal.state.ann_index, 'radius_neighbors'):
+            embeddings = np.vstack([c.subsymbolic for c in self.crystal.state.concepts])
+            distances, indices = self.crystal.state.ann_index.radius_neighbors(embeddings, radius=self.threshold)
+            for i, neighs in enumerate(indices):
+                for j in neighs:
+                    if j <= i:
+                        continue
+                    diff = self.crystal.state.concepts[i].subsymbolic - self.crystal.state.concepts[j].subsymbolic
+                    norm = np.linalg.norm(diff)
+                    if norm < 1e-8:
+                        continue
+                    force = self.strength * diff / norm
+                    self.crystal.state.concepts[i].subsymbolic = project_to_ball(
+                        self.crystal.state.concepts[i].subsymbolic + force
+                    )
+                    self.crystal.state.concepts[j].subsymbolic = project_to_ball(
+                        self.crystal.state.concepts[j].subsymbolic - force
+                    )
+        else:
+            # Fallback: brute force pairwise
+            for i in range(n):
+                for j in range(i+1, n):
+                    diff = self.crystal.state.concepts[i].subsymbolic - self.crystal.state.concepts[j].subsymbolic
+                    dist = np.linalg.norm(diff)
+                    if dist < self.threshold and dist > 1e-8:
+                        force = self.strength * diff / dist
+                        self.crystal.state.concepts[i].subsymbolic = project_to_ball(
+                            self.crystal.state.concepts[i].subsymbolic + force
+                        )
+                        self.crystal.state.concepts[j].subsymbolic = project_to_ball(
+                            self.crystal.state.concepts[j].subsymbolic - force
+                        )
 
 # -----------------------------------------------------------------------------
-# EmergenceDetector – Enhanced with persistent homology (fixed)
+# EmergenceDetector – with persistent homology
 # -----------------------------------------------------------------------------
 class EmergenceDetector:
-    """
-    Monitors topological changes (Betti numbers, concept cloud spread) and
-    triggers creative destruction events when stagnation is detected.
-    """
     def __init__(self, config: dict):
         self.stagnation_threshold = config.get("stagnation_threshold", 10)
         self.creative_destruction_fraction = config.get("creative_destruction_fraction", 0.2)
@@ -576,10 +546,8 @@ class EmergenceDetector:
 
     @staticmethod
     def _diagram_to_array(diagram):
-        """Convert a gudhi persistence diagram to a numpy array of shape (n,2)."""
         arr = []
         for dim, (b, d) in diagram:
-            # Replace infinite death with a large finite number
             if d == float('inf'):
                 d = 1e10
             arr.append([b, d])
@@ -587,8 +555,8 @@ class EmergenceDetector:
 
     def detect_stagnation(self, crystal: HyperCrystal) -> bool:
         metrics = crystal.get_metrics()
-        current_betti = (metrics["betti_0"], metrics["betti_1"])
-        current_triple = metrics["triple_point"]
+        current_betti = (metrics.get("betti_0", 0), metrics.get("betti_1", 0))
+        current_triple = metrics.get("triple_point", 0.5)
 
         if self.last_betti is not None and current_betti == self.last_betti:
             self.consecutive_stable += 1
@@ -601,7 +569,6 @@ class EmergenceDetector:
         if current_triple < 0.05 and self.consecutive_stable > 5:
             return True
 
-        # Use persistent homology if available
         if HAS_GUDHI and len(crystal.state.concepts) > 5:
             embeddings = np.vstack([c.subsymbolic for c in crystal.state.concepts])
             rips = gudhi.RipsComplex(points=embeddings)
@@ -621,27 +588,22 @@ class EmergenceDetector:
         n_remove = int(len(crystal.state.concepts) * self.creative_destruction_fraction)
         if n_remove <= 0:
             return
-
         indices = list(range(len(crystal.state.concepts)))
         indices.sort(key=lambda i: crystal.state.concept_fitness.get(i, 0.0))
         indices_to_remove = set(indices[:n_remove])
         new_concepts = []
-        new_goals = {}
         new_fitness = {}
-        new_rewards = {}
         for i, c in enumerate(crystal.state.concepts):
             if i not in indices_to_remove:
+                new_idx = len(new_concepts)
                 new_concepts.append(c)
-                new_goals[len(new_concepts)-1] = crystal.state.concept_goals.get(i, GoalField(0,0,0))
-                new_fitness[len(new_concepts)-1] = crystal.state.concept_fitness.get(i, 0.5)
-                new_rewards[len(new_concepts)-1] = crystal.state.concept_rewards.get(i, [])
+                new_fitness[new_idx] = crystal.state.concept_fitness.get(i, 0.5)
         crystal.state.concepts = new_concepts
-        crystal.state.concept_goals = new_goals
         crystal.state.concept_fitness = new_fitness
-        crystal.state.concept_rewards = new_rewards
+        crystal.state.ann_embeddings = [c.subsymbolic for c in new_concepts]
+        crystal._update_ann_index()
         if hasattr(crystal, '_update_pareto_front'):
             crystal._update_pareto_front()
-        crystal._rebuild_ann_index()
         self.triggered_destruction = True
 
     def step(self, crystal: HyperCrystal) -> None:
@@ -652,44 +614,26 @@ class EmergenceDetector:
             self.triggered_destruction = False
 
 # -----------------------------------------------------------------------------
-# CognitionEngine – Orchestrates all cognitive components
+# CognitionEngine – orchestrator
 # -----------------------------------------------------------------------------
 class CognitionEngine:
-    """
-    Main class that integrates goal steering, novelty injection, meta‑learning,
-    and emergence detection into a single cognitive step.
-    """
     def __init__(self, crystal: HyperCrystal):
         self.crystal = crystal
         self.config = crystal.config
-        # Initialize components
         self.novelty_injector = DiffusionNoveltyInjector(crystal, self.config)
         self.meta_learner = MetaLearner(crystal, self.config)
         self.emergence_detector = EmergenceDetector(self.config)
         self.repulsion_force = RepulsionForce(crystal, self.config)
-
-        # Novelty registry
         self.novelty_registry = NoveltyRegistry()
-
-        # Store reference for meta‑learner to update params
+        # Attach to crystal for meta‑learner to update params
         self.crystal.cognition = self
 
     def step(self) -> None:
-        # Step internal (core engine) handles goal steering, reward propagation, metrics
         self.crystal.step_internal()
-
-        # 2. Novelty injection
         self.novelty_injector.step()
-
-        # 3. Meta‑learning
         self.meta_learner.step()
-
-        # 4. Emergence detection
         self.emergence_detector.step(self.crystal)
-
-        # 5. Repulsion force
         self.repulsion_force.step()
-
         # Update novelty registry
         for concept in self.crystal.state.concepts:
             if self.novelty_registry.is_novel(concept):
@@ -701,24 +645,40 @@ class CognitionEngine:
             self.step()
             if verbose and (_ % 5 == 0 or _ == steps-1):
                 metrics = self.crystal.get_metrics()
-                # Count novel concepts (non-init, non-distilled)
-                novel_count = sum(
-                    1 for c in self.crystal.state.concepts
-                    if c.symbolic and not c.symbolic[0].startswith("init_")
-                    and not c.symbolic[0].startswith("distilled")
-                )
-                print(f"Step {metrics['step']}: σ={metrics['sophia']:.3f}, "
-                      f"ρ_dark={metrics['dark_wisdom']:.3f}, Π={metrics['paradox']:.3f}, "
-                      f"T3={metrics['triple_point']:.3f}, "
+                novel_count = sum(1 for c in self.crystal.state.concepts
+                                  if c.symbolic and not c.symbolic[0].startswith("init_")
+                                  and not c.symbolic[0].startswith("distilled"))
+                print(f"Step {metrics['step']}: σ={metrics.get('sophia',0):.3f}, "
+                      f"ρ_dark={metrics.get('dark_wisdom',0):.3f}, Π={metrics.get('paradox',0):.3f}, "
+                      f"T3={metrics.get('triple_point',0):.3f}, "
                       f"concepts={metrics['concept_count']} (novel={novel_count}), "
-                      f"fitness={metrics['avg_fitness']:.3f}, strategy={self.meta_learner.active_strategy}")
-
+                      f"fitness={metrics.get('avg_fitness',0):.3f}, strategy={self.meta_learner.active_strategy}")
 
 # -----------------------------------------------------------------------------
-# Example usage (if run directly)
+# Add missing _fast_novelty method to HyperCrystal (monkey patch)
+# -----------------------------------------------------------------------------
+def _fast_novelty(self, concept: Concept) -> float:
+    """Compute novelty as 1 - maximum similarity to existing concepts."""
+    if len(self.state.concepts) == 0:
+        return 1.0
+    # Use ANN to find nearest neighbor distance
+    results = self.retrieve_similar(concept.subsymbolic, k=1)
+    if not results:
+        return 1.0
+    dist = results[0][1]  # Euclidean distance
+    # Convert distance to similarity in [0,1]
+    similarity = np.exp(-dist)  # or 1/(1+dist)
+    return 1.0 - similarity
+
+# Apply patch if not already present
+if not hasattr(HyperCrystal, '_fast_novelty'):
+    HyperCrystal._fast_novelty = _fast_novelty
+
+# -----------------------------------------------------------------------------
+# Example usage
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    from core_engine import load_config
+    from hypercrystal.core_engine import load_config
     config = load_config()
     crystal = HyperCrystal(config)
     engine = CognitionEngine(crystal)
