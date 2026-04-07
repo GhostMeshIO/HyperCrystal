@@ -10,6 +10,12 @@ Enhanced with:
 - Input validation
 - Proper goal assignment for new concepts
 - Placeholder for goal steering learning
+
+Fixes applied:
+- #008: Concept UUIDs replace list indices in all dictionaries
+- #010: project_to_ball guards against near-zero vectors
+- #011: Threading locks (RLock) for state mutations
+- #053: Stable concept identification via UUID
 """
 
 import json
@@ -20,6 +26,8 @@ import time
 import warnings
 import hashlib
 import secrets
+import threading
+import uuid
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any, Set, Union
@@ -32,7 +40,7 @@ from collections import deque
 try:
     from rne_core_types import (
         Concept, CausalGraph, RNEContext, mobius_distance,
-        project_to_ball, SOPHIA_POINT
+        project_to_ball as rne_project_to_ball, SOPHIA_POINT
     )
     from rne_alien_math import (
         PHI, PHI_INV,
@@ -63,7 +71,8 @@ except ImportError:
         def __init__(self, subsymbolic=None, symbolic=None, causal_graph=None,
                      sophia_score=0.5, dark_wisdom_density=0.0, paradox_intensity=0.0,
                      chronon_entanglement=0.0, biophoton_amplitude=0.0, z3_phase=1+0j,
-                     retrocausal_kernel=None):
+                     retrocausal_kernel=None, uuid=None):
+            self.uuid = uuid if uuid is not None else str(uuid.uuid4())
             self.subsymbolic = np.asarray(subsymbolic, dtype=np.float64) if subsymbolic is not None else np.random.randn(64)
             self.symbolic = symbolic or []
             self.causal_graph = causal_graph or CausalGraph()
@@ -97,7 +106,7 @@ except ImportError:
         def add_to_memory(self, c):
             self.K_t.append(c)
 
-    def project_to_ball(v, eps=1e-8):
+    def rne_project_to_ball(v, eps=1e-8):
         v = np.asarray(v, dtype=np.float64)
         norm = np.linalg.norm(v)
         if norm >= 1.0:
@@ -123,7 +132,7 @@ except ImportError:
     def batch_sophia_geodesic_flow(e, s, step=0.01):
         norms = np.linalg.norm(e, axis=1, keepdims=True)
         grad = 2.0*(norms - SOPHIA_POINT)*(e/(norms+1e-8))
-        return project_to_ball(e - step*grad)
+        return rne_project_to_ball(e - step*grad)
 
     def manifold_mixup(emb, w):
         return sum(w[i]*emb[i] for i in range(len(emb)))/sum(w)
@@ -165,6 +174,18 @@ G_INFO = 1.0
 DEFAULT_DIM = 128
 EPS = 1e-8
 
+def project_to_ball(v, eps=EPS):
+    """Project vector onto unit ball with guard against near-zero vectors."""
+    v = np.asarray(v, dtype=np.float64)
+    norm = np.linalg.norm(v)
+    if norm < eps:
+        # Generate a small random vector to avoid division by zero
+        v = np.random.randn(*v.shape) * eps
+        norm = np.linalg.norm(v)
+    if norm > 1.0:
+        return v / norm
+    return v.copy()
+
 # -----------------------------------------------------------------------------
 # Configuration loader (shared)
 # -----------------------------------------------------------------------------
@@ -205,7 +226,6 @@ def load_config(config_path: str = "hypercrystal_config.json") -> dict:
             "enterprise": {"concepts": 100000, "queries_per_day": 100000, "price_usd": 199, "initial_credits": 10000}
         },
         "api_key_prefix": "hc_",
-        # New cognitive parameters
         "goal_learning_rate": 0.05,
         "reward_decay": 0.95,
         "fitness_weights": {"sophia": 1.0, "dark_wisdom": 1.0, "paradox": 0.5, "goal_alignment": 1.0},
@@ -215,19 +235,16 @@ def load_config(config_path: str = "hypercrystal_config.json") -> dict:
         "pareto_front_size": 100,
         "subgoal_depth": 3,
         "conflict_threshold": 0.3,
-        "soa_enabled": True,               # Structure-of-Arrays encoding placeholder
+        "soa_enabled": True,
         "quantization_bits": 8,
-        # New scaling parameters
         "mmd_threshold": 0.1,
         "repulsion_strength": 0.02,
         "gradient_tau": 1.0,
-        "ann_update_interval": 10,         # steps between rebuilding ANN index
-        # === New keys for novelty gate and mutation ===
+        "ann_update_interval": 10,
         "novelty_acceptance_threshold": 0.08,
         "min_mutation_rate": 0.08,
         "max_mutation_rate": 0.35,
         "stagnation_threshold": 10,
-        # Updated mutation defaults
         "mutation_rate_base": 0.15,
         "burst_probability": 0.12,
         "burst_factor": 3.5,
@@ -273,7 +290,6 @@ class GoalField:
         return np.mean(self.history, axis=0)
 
     def is_conflicting(self, other: 'GoalField', threshold: float = 0.3) -> bool:
-        """Detect if two goals are in conflict (angle > threshold)."""
         u = self.as_array()
         v = other.as_array()
         norm_u = np.linalg.norm(u)
@@ -284,7 +300,6 @@ class GoalField:
         return cos < threshold
 
     def resolve_conflict(self, other: 'GoalField') -> 'GoalField':
-        """Return a compromise goal (midpoint in field space)."""
         return GoalField.from_array((self.as_array() + other.as_array()) / 2.0)
 
     def __repr__(self):
@@ -629,7 +644,6 @@ class UnificationEquations:
             else:
                 norms = np.linalg.norm(embeddings, axis=1)
                 holo_area = np.var(norms) if len(norms) > 1 else 0.0
-            # Ensure non-negative
             if holo_area < 0:
                 holo_area = 0.0
             norms = np.linalg.norm(embeddings, axis=1)
@@ -676,7 +690,7 @@ class UnificationEquations:
         return state.non_hermitian_term > 0.2
 
 # -----------------------------------------------------------------------------
-# HyperCrystalState (enhanced)
+# HyperCrystalState (enhanced with UUID keys)
 # -----------------------------------------------------------------------------
 @dataclass
 class HyperCrystalState:
@@ -697,12 +711,12 @@ class HyperCrystalState:
     retrocausal_kernel_norm: float = 0.0
     ricci_proxy: float = 0.0
     convergence_counter: int = 0
-    # Additional fields
+    # New: concepts stored in list, metadata keyed by UUID
     concepts: List[Concept] = field(default_factory=list)
-    concept_goals: Dict[int, GoalField] = field(default_factory=dict)
-    concept_fitness: Dict[int, float] = field(default_factory=dict)
-    concept_rewards: Dict[int, List[float]] = field(default_factory=dict)
-    concept_pareto_front: List[int] = field(default_factory=list)  # indices of non-dominated concepts
+    concept_goals: Dict[str, GoalField] = field(default_factory=dict)      # uuid -> GoalField
+    concept_fitness: Dict[str, float] = field(default_factory=dict)        # uuid -> fitness
+    concept_rewards: Dict[str, List[float]] = field(default_factory=dict)  # uuid -> reward history
+    concept_pareto_front: List[str] = field(default_factory=list)          # list of uuids
     swarm_agents: List[Any] = field(default_factory=list)
     rne_context: RNEContext = field(default_factory=RNEContext)
     consciousness_tracker: Optional[Any] = None
@@ -711,8 +725,8 @@ class HyperCrystalState:
     config: dict = field(default_factory=dict)
     memory_optimizer: Optional[MemoryOptimizer] = None
     global_goal: Optional[GoalField] = None
-    goal_stack: List[GoalField] = field(default_factory=list)  # hierarchical stack
-    # New: ANN index for fast similarity
+    goal_stack: List[GoalField] = field(default_factory=list)
+    # ANN index
     ann_index: Optional[Any] = None
     ann_index_built_at_step: int = -1
 
@@ -724,13 +738,16 @@ class HyperCrystalState:
         ) / 3.0
 
 # -----------------------------------------------------------------------------
-# HyperCrystal main class (enhanced)
+# HyperCrystal main class (enhanced with locks and UUIDs)
 # -----------------------------------------------------------------------------
 class HyperCrystal:
     def __init__(self, config: dict = None):
         self.config = config if config is not None else load_config()
         np.random.seed(self.config["seed"])
         random.seed(self.config["seed"])
+
+        # Thread lock for state mutations
+        self._lock = threading.RLock()
 
         # State
         self.state = HyperCrystalState()
@@ -811,8 +828,8 @@ class HyperCrystal:
         self.prev_sophia = SOPHIA_POINT
         self.convergence_counter = 0
 
-        # Goal steering model placeholder (for future differentiable steering)
-        self._goal_steering_model = None  # Will be implemented later
+        # Goal steering model placeholder
+        self._goal_steering_model = None
 
     def _init_concepts(self):
         for i in range(60):
@@ -831,15 +848,16 @@ class HyperCrystal:
                 chronon_entanglement=random.uniform(0.4, 0.6),
                 biophoton_amplitude=random.uniform(0.3, 0.5),
                 z3_phase=random.choice(Z3_ROOTS),
-                retrocausal_kernel=np.random.randn(10) * 0.1
+                retrocausal_kernel=np.random.randn(10) * 0.1,
+                uuid=str(uuid.uuid4())
             )
             self.state.concepts.append(c)
             self.state.rne_context.add_to_memory(c)
             self.qhdram.store(f"init_{i}", c.subsymbolic)
             goal = GoalField(0.0, 0.0, 0.0)
-            self.state.concept_goals[i] = goal
-            self.state.concept_fitness[i] = self._compute_fitness(c, goal)
-            self.state.concept_rewards[i] = []
+            self.state.concept_goals[c.uuid] = goal
+            self.state.concept_fitness[c.uuid] = self._compute_fitness(c, goal)
+            self.state.concept_rewards[c.uuid] = []
         self._update_pareto_front()
         self._rebuild_ann_index()
 
@@ -861,31 +879,29 @@ class HyperCrystal:
             self.state.ann_index = None
 
     def _fast_novelty(self, concept: Concept) -> float:
-        """Compute novelty using ANN index if available, else fallback to linear scan."""
-        if self.state.ann_index is not None and len(self.state.concepts) > 1:
-            # Find nearest neighbor via index
-            distances, indices = self.state.ann_index.kneighbors(concept.subsymbolic.reshape(1,-1), n_neighbors=1)
-            min_dist = distances[0][0]
-            neighbor = self.state.concepts[indices[0][0]]
-            # Symbolic overlap
-            overlap = len(set(concept.symbolic) & set(neighbor.symbolic))
-            sym_penalty = overlap / (len(concept.symbolic) + 1)
-            return min_dist * (1 - sym_penalty)
-        else:
-            # Fallback to linear scan
-            distances = [mobius_distance(concept.subsymbolic, c.subsymbolic) for c in self.state.concepts if c is not concept]
-            min_dist = min(distances) if distances else 1.0
-            overlap = 0
-            for sym in concept.symbolic:
-                for c in self.state.concepts:
-                    if sym in c.symbolic:
-                        overlap += 1
-                        break
-            sym_penalty = overlap / (len(concept.symbolic) + 1)
-            return min_dist * (1 - sym_penalty)
+        """Compute novelty using ANN index if available, else linear scan."""
+        with self._lock:
+            if self.state.ann_index is not None and len(self.state.concepts) > 1:
+                distances, indices = self.state.ann_index.kneighbors(concept.subsymbolic.reshape(1,-1), n_neighbors=1)
+                min_dist = distances[0][0]
+                neighbor = self.state.concepts[indices[0][0]]
+                overlap = len(set(concept.symbolic) & set(neighbor.symbolic))
+                sym_penalty = overlap / (len(concept.symbolic) + 1)
+                return min_dist * (1 - sym_penalty)
+            else:
+                distances = [mobius_distance(concept.subsymbolic, c.subsymbolic) for c in self.state.concepts if c.uuid != concept.uuid]
+                min_dist = min(distances) if distances else 1.0
+                overlap = 0
+                for sym in concept.symbolic:
+                    for c in self.state.concepts:
+                        if sym in c.symbolic:
+                            overlap += 1
+                            break
+                sym_penalty = overlap / (len(concept.symbolic) + 1)
+                return min_dist * (1 - sym_penalty)
 
     # -------------------------------------------------------------------------
-    # Fitness and reward
+    # Fitness and reward (using UUIDs)
     # -------------------------------------------------------------------------
     def _compute_fitness(self, concept: Concept, goal: GoalField) -> float:
         weights = self.config["fitness_weights"]
@@ -907,98 +923,91 @@ class HyperCrystal:
         return 1.0 - dist
 
     def _propagate_reward(self, reward: float):
-        """Propagate reward to concept fields and embeddings."""
         lr = self.config["goal_learning_rate"]
         global_goal_arr = self.state.global_goal.smoothed_goal()
 
-        for idx, concept in enumerate(self.state.concepts):
-            # Update reward history
-            hist = self.state.concept_rewards.setdefault(idx, [])
+        for concept in self.state.concepts:
+            uuid = concept.uuid
+            hist = self.state.concept_rewards.get(uuid, [])
             hist.append(reward)
             if len(hist) > self.config["goal_history_length"]:
                 hist.pop(0)
+            self.state.concept_rewards[uuid] = hist
             avg_reward = np.mean(hist) if hist else reward
 
-            # Field gradient toward global goal
             current_fields = np.array([concept.sophia_score, concept.dark_wisdom_density, concept.paradox_intensity])
             delta = lr * avg_reward * (global_goal_arr - current_fields)
             concept.sophia_score = np.clip(concept.sophia_score + delta[0], 0.0, 1.0)
             concept.dark_wisdom_density = np.clip(concept.dark_wisdom_density + delta[1], 0.0, 1.0)
             concept.paradox_intensity = np.clip(concept.paradox_intensity + delta[2], 0.0, 1.0)
 
-            # Embedding steering: placeholder for differentiable model
             if self.config["goal_conditioned_embedding"]:
                 field_error = global_goal_arr - current_fields
-                # Use a fixed random projection for now (will be replaced by learned model)
                 proj = np.random.randn(len(concept.subsymbolic), 3)
                 delta_emb = self.config["embedding_steering_strength"] * (proj @ field_error) * avg_reward
                 concept.subsymbolic = project_to_ball(concept.subsymbolic + delta_emb)
 
     # -------------------------------------------------------------------------
-    # Pareto front with crowding distance
+    # Pareto front with crowding distance (using UUIDs)
     # -------------------------------------------------------------------------
-    def _non_dominated_sort(self) -> List[List[int]]:
-        """Perform non-dominated sorting on all concepts."""
+    def _non_dominated_sort(self) -> List[List[str]]:
+        """Return list of fronts, each front is a list of UUIDs."""
         n = len(self.state.concepts)
         fronts = []
-        # domination matrix
+        # domination matrix: (uuid_i, uuid_j) -> i dominates j?
+        uuid_to_idx = {c.uuid: i for i, c in enumerate(self.state.concepts)}
         dominates = np.zeros((n, n), dtype=bool)
-        for i in range(n):
-            for j in range(n):
-                if i != j:
-                    obj_i = self._objectives(i)
-                    obj_j = self._objectives(j)
-                    if (obj_i >= obj_j).all() and (obj_i > obj_j).any():
-                        dominates[i, j] = True
-        # Count how many dominate each individual
+        for i, c_i in enumerate(self.state.concepts):
+            for j, c_j in enumerate(self.state.concepts):
+                if i == j:
+                    continue
+                obj_i = self._objectives(c_i.uuid)
+                obj_j = self._objectives(c_j.uuid)
+                if (obj_i >= obj_j).all() and (obj_i > obj_j).any():
+                    dominates[i, j] = True
         dominated_count = np.sum(dominates, axis=0)
-        # First front: those with zero dominating others
-        current_front = [i for i in range(n) if dominated_count[i] == 0]
+        current_front = [self.state.concepts[i].uuid for i in range(n) if dominated_count[i] == 0]
         fronts.append(current_front)
-        # Remaining fronts
         while current_front:
             next_front = []
-            for i in current_front:
+            for uuid in current_front:
+                i = uuid_to_idx[uuid]
                 for j in range(n):
                     if dominates[i, j]:
                         dominated_count[j] -= 1
                         if dominated_count[j] == 0:
-                            next_front.append(j)
+                            next_front.append(self.state.concepts[j].uuid)
             if next_front:
                 fronts.append(next_front)
             current_front = next_front
         return fronts
 
-    def _objectives(self, idx: int) -> np.ndarray:
-        c = self.state.concepts[idx]
-        # We maximize sophia, dark_wisdom, fitness
-        return np.array([c.sophia_score, c.dark_wisdom_density, self.state.concept_fitness.get(idx, 0.0)])
+    def _objectives(self, uuid: str) -> np.ndarray:
+        concept = next(c for c in self.state.concepts if c.uuid == uuid)
+        fitness = self.state.concept_fitness.get(uuid, 0.0)
+        return np.array([concept.sophia_score, concept.dark_wisdom_density, fitness])
 
-    def _crowding_distance(self, front_indices: List[int]) -> List[float]:
-        """Compute crowding distance for individuals in a front."""
-        n = len(front_indices)
+    def _crowding_distance(self, front_uuids: List[str]) -> List[float]:
+        n = len(front_uuids)
         if n <= 2:
             return [float('inf')] * n
         distances = np.zeros(n)
-        # For each objective
+        uuid_to_idx = {uuid: i for i, uuid in enumerate(front_uuids)}
         for obj in range(3):
-            # Sort by this objective
-            sorted_idx = sorted(range(n), key=lambda i: self._objectives(front_indices[i])[obj])
-            # Set extremes to infinite
-            distances[sorted_idx[0]] = float('inf')
-            distances[sorted_idx[-1]] = float('inf')
-            # For others, add normalized distance
-            obj_values = [self._objectives(front_indices[i])[obj] for i in sorted_idx]
+            sorted_uuids = sorted(front_uuids, key=lambda u: self._objectives(u)[obj])
+            distances[uuid_to_idx[sorted_uuids[0]]] = float('inf')
+            distances[uuid_to_idx[sorted_uuids[-1]]] = float('inf')
+            obj_values = [self._objectives(u)[obj] for u in sorted_uuids]
             f_max = max(obj_values)
             f_min = min(obj_values)
             if f_max == f_min:
                 continue
             for k in range(1, n-1):
-                distances[sorted_idx[k]] += (obj_values[k+1] - obj_values[k-1]) / (f_max - f_min)
+                idx = uuid_to_idx[sorted_uuids[k]]
+                distances[idx] += (obj_values[k+1] - obj_values[k-1]) / (f_max - f_min)
         return distances.tolist()
 
     def _update_pareto_front(self):
-        """Update Pareto front with crowding distance to maintain diversity."""
         if not self.state.concepts:
             return
         fronts = self._non_dominated_sort()
@@ -1009,13 +1018,10 @@ class HyperCrystal:
                 new_front.extend(front)
                 remaining -= len(front)
             else:
-                # Sort front by crowding distance descending
                 distances = self._crowding_distance(front)
-                # Pair indices with distances
                 paired = list(zip(front, distances))
-                # Sort by distance descending, infinite distances first
                 paired.sort(key=lambda x: x[1], reverse=True)
-                new_front.extend([i for i, _ in paired[:remaining]])
+                new_front.extend([u for u, _ in paired[:remaining]])
                 break
         self.state.concept_pareto_front = new_front
 
@@ -1023,7 +1029,6 @@ class HyperCrystal:
     # Drift detection via MMD
     # -------------------------------------------------------------------------
     def _compute_mmd(self, x: np.ndarray, y: np.ndarray, gamma: float = 1.0) -> float:
-        """Compute Maximum Mean Discrepancy between two sets of points using RBF kernel."""
         if not HAS_SKLEARN or len(x) == 0 or len(y) == 0:
             return 0.0
         K_xx = rbf_kernel(x, x, gamma=gamma)
@@ -1033,15 +1038,12 @@ class HyperCrystal:
         return max(0.0, mmd)
 
     def _detect_drift(self) -> bool:
-        """Detect distribution shift in concept embeddings using MMD."""
         if len(self.embedding_history) < 10:
             return False
         current = np.vstack([c.subsymbolic for c in self.state.concepts])
-        # Sample past mean (or use a representative set)
         past = np.array(self.embedding_history_mean)
         if len(past) < 10:
             return False
-        # Compute gamma as median heuristic
         gamma = 1.0 / (np.median(pairwise_distances(current))**2 + EPS)
         mmd = self._compute_mmd(current, past, gamma)
         return mmd > self.config.get("mmd_threshold", 0.1)
@@ -1050,27 +1052,24 @@ class HyperCrystal:
     # Goal stack management
     # -------------------------------------------------------------------------
     def push_goal(self, goal: GoalField):
-        """Push a new goal onto the stack (child of current top)."""
-        if self.state.goal_stack:
-            goal.parent = self.state.goal_stack[-1]
-            self.state.goal_stack[-1].children.append(goal)
-        self.state.goal_stack.append(goal)
-        self.state.global_goal = goal  # current top becomes global goal
+        with self._lock:
+            if self.state.goal_stack:
+                goal.parent = self.state.goal_stack[-1]
+                self.state.goal_stack[-1].children.append(goal)
+            self.state.goal_stack.append(goal)
+            self.state.global_goal = goal
 
     def pop_goal(self) -> Optional[GoalField]:
-        """Pop the current goal, restoring parent."""
-        if len(self.state.goal_stack) <= 1:
-            return None
-        old = self.state.goal_stack.pop()
-        self.state.global_goal = self.state.goal_stack[-1]
-        return old
+        with self._lock:
+            if len(self.state.goal_stack) <= 1:
+                return None
+            old = self.state.goal_stack.pop()
+            self.state.global_goal = self.state.goal_stack[-1]
+            return old
 
     def decompose_goal(self, goal: GoalField, depth: int = 1) -> List[GoalField]:
-        """Decompose a goal into subgoals using concept clusters (placeholder)."""
-        # Simplified placeholder; will be replaced by mutual information approach later
         if not self.state.concepts or depth <= 0:
             return []
-        # Use clustering on concept embeddings to generate subgoals
         embeddings = np.vstack([c.subsymbolic for c in self.state.concepts])
         if not HAS_SKLEARN or len(embeddings) < 2:
             return []
@@ -1085,7 +1084,6 @@ class HyperCrystal:
             cluster_indices = [i for i, l in enumerate(labels) if l == cluster_id]
             if not cluster_indices:
                 continue
-            # Compute average field of cluster concepts
             avg_sophia = np.mean([self.state.concepts[i].sophia_score for i in cluster_indices])
             avg_dark = np.mean([self.state.concepts[i].dark_wisdom_density for i in cluster_indices])
             avg_paradox = np.mean([self.state.concepts[i].paradox_intensity for i in cluster_indices])
@@ -1094,43 +1092,32 @@ class HyperCrystal:
             subgoals.append(subgoal)
         return subgoals
 
-    # -------------------------------------------------------------------------
-    # Conflict resolution
-    # -------------------------------------------------------------------------
     def _resolve_goal_conflicts(self):
-        """Check for conflicts between goals in stack and resolve."""
         if len(self.state.goal_stack) < 2:
             return
         top = self.state.goal_stack[-1]
         parent = self.state.goal_stack[-2]
         if top.is_conflicting(parent, self.config["conflict_threshold"]):
             compromise = top.resolve_conflict(parent)
-            # Replace top with compromise
             self.state.goal_stack[-1] = compromise
             self.state.global_goal = compromise
 
-    # -------------------------------------------------------------------------
-    # Goal-driven embedding steering (improved placeholder)
-    # -------------------------------------------------------------------------
     def _goal_steer_embeddings(self):
-        # Placeholder: will be replaced by learned model later
         lr = self.config["embedding_steering_strength"]
         global_goal_arr = self.state.global_goal.smoothed_goal()
-        for idx, concept in enumerate(self.state.concepts):
-            goal = self.state.concept_goals.get(idx)
+        for concept in self.state.concepts:
+            goal = self.state.concept_goals.get(concept.uuid)
             if goal is None:
                 continue
-            # Blend personal goal with global goal
             combined_goal = (goal.as_array() + global_goal_arr) / 2.0
             current_fields = np.array([concept.sophia_score, concept.dark_wisdom_density, concept.paradox_intensity])
             field_error = combined_goal - current_fields
-            # Use fixed random projection (will be replaced)
             proj = np.random.randn(len(concept.subsymbolic), 3)
             delta_emb = lr * (proj @ field_error)
             concept.subsymbolic = project_to_ball(concept.subsymbolic + delta_emb)
 
     # -------------------------------------------------------------------------
-    # Metrics update (robust)
+    # Metrics update (robust, uses UUIDs)
     # -------------------------------------------------------------------------
     def _update_metrics(self) -> None:
         if len(self.state.concepts) > 0:
@@ -1163,7 +1150,6 @@ class HyperCrystal:
                         e_dists[i, j] = np.linalg.norm(embeddings[i] - embeddings[j])
                 diff = (h_dists - e_dists).flatten()
                 self.state.ricci_proxy = np.mean(diff)
-                # Note: we do NOT overwrite dark_wisdom_density here anymore.
             else:
                 self.state.ricci_proxy = 0.0
 
@@ -1193,7 +1179,6 @@ class HyperCrystal:
         self.state.spiritual_score = 0.5 + 0.3 * self.state.non_hermitian_term + 0.2 * (self.state.meta_depth / self.config.get("max_meta_depth", 10))
         self.state.spiritual_score = np.clip(self.state.spiritual_score, 0.0, 1.0)
 
-        # Sophia attractor
         if self.state.concepts and self.config.get("sophia_attractor_strength", 0.2) > 0:
             embeddings = np.vstack([c.subsymbolic for c in self.state.concepts])
             sophia_scores = np.array([c.sophia_score for c in self.state.concepts])
@@ -1203,7 +1188,6 @@ class HyperCrystal:
                 c.sophia_score = max(0.0, min(1.0, c.sophia_score + self.config["sophia_attractor_strength"] * (SOPHIA_POINT - c.sophia_score)))
             self.state.sophia_score = np.mean([c.sophia_score for c in self.state.concepts])
 
-        # Convergence detection
         diff = abs(self.state.sophia_score - SOPHIA_POINT)
         if diff < self.config["convergence_threshold"]:
             self.convergence_counter += 1
@@ -1215,31 +1199,26 @@ class HyperCrystal:
             if self.config["verbose"]:
                 print("[Convergence] System near Sophia point. Increasing meta_depth.")
 
-        # Adaptive mutation (placeholder, will be refined)
         if diff < 0.1:
             self.state.rne_context.params["mutation_rate"] = max(0.02, self.state.rne_context.params.get("mutation_rate", 0.1) * 0.95)
         else:
             self.state.rne_context.params["mutation_rate"] = min(0.2, self.state.rne_context.params.get("mutation_rate", 0.1) * 1.02)
 
-        # Paradox evolution
         if self.state.meta_depth < 2:
             self.state.paradox_intensity = min(0.8, self.state.paradox_intensity + self.config["paradox_rise_rate"])
         else:
             self.state.paradox_intensity = max(0.1, self.state.paradox_intensity - self.config["paradox_rise_rate"] * 0.5)
 
-        # Update fitness for each concept
-        for idx, concept in enumerate(self.state.concepts):
-            goal = self.state.concept_goals.get(idx, GoalField(0,0,0))
-            self.state.concept_fitness[idx] = self._compute_fitness(concept, goal)
+        # Update fitness for each concept (using UUIDs)
+        for concept in self.state.concepts:
+            goal = self.state.concept_goals.get(concept.uuid, GoalField(0,0,0))
+            self.state.concept_fitness[concept.uuid] = self._compute_fitness(concept, goal)
 
-        # Update Pareto front
         self._update_pareto_front()
 
-        # Propagate reward
         reward = self._compute_global_reward()
         self._propagate_reward(reward)
 
-        # Evict low-fitness concepts if memory full
         self._evict_by_fitness()
 
     def _evict_by_fitness(self):
@@ -1247,256 +1226,233 @@ class HyperCrystal:
         capacity = self.config["memory_capacity"]
         if len(self.state.concepts) <= capacity:
             return
-        # Sort by fitness
-        indices = list(range(len(self.state.concepts)))
-        indices.sort(key=lambda i: self.state.concept_fitness.get(i, 0.0))
+        # Sort by fitness (lowest first)
+        concepts_with_fitness = [(c, self.state.concept_fitness.get(c.uuid, 0.0)) for c in self.state.concepts]
+        concepts_with_fitness.sort(key=lambda x: x[1])
         evict_count = len(self.state.concepts) - capacity
-        evict_indices = indices[:evict_count]
+        evict_uuids = set(c.uuid for c, _ in concepts_with_fitness[:evict_count])
+
         # Keep only non-evicted concepts
         new_concepts = []
-        new_goals = {}
-        new_fitness = {}
-        new_rewards = {}
-        new_idx = 0
-        for i, c in enumerate(self.state.concepts):
-            if i not in evict_indices:
+        for c in self.state.concepts:
+            if c.uuid not in evict_uuids:
                 new_concepts.append(c)
-                new_goals[new_idx] = self.state.concept_goals.get(i, GoalField(0,0,0))
-                new_fitness[new_idx] = self.state.concept_fitness.get(i, 0.5)
-                new_rewards[new_idx] = self.state.concept_rewards.get(i, [])
-                new_idx += 1
         self.state.concepts = new_concepts
-        self.state.concept_goals = new_goals
-        self.state.concept_fitness = new_fitness
-        self.state.concept_rewards = new_rewards
-        # Also update Pareto front
+
+        # Remove metadata for evicted UUIDs
+        for uuid in evict_uuids:
+            self.state.concept_goals.pop(uuid, None)
+            self.state.concept_fitness.pop(uuid, None)
+            self.state.concept_rewards.pop(uuid, None)
+        # Update Pareto front (remove evicted UUIDs)
+        self.state.concept_pareto_front = [uuid for uuid in self.state.concept_pareto_front if uuid not in evict_uuids]
+
         self._update_pareto_front()
-        # Rebuild ANN index
         self._rebuild_ann_index()
 
     # -------------------------------------------------------------------------
-    # Internal step
+    # Internal step (thread-safe)
     # -------------------------------------------------------------------------
     def step_internal(self) -> None:
-        self.state.step += 1
+        with self._lock:
+            self.state.step += 1
+            self._resolve_goal_conflicts()
+            self._goal_steer_embeddings()
+            self._update_metrics()
 
-        # Resolve goal conflicts
-        self._resolve_goal_conflicts()
+            VirtualEnhancements.z3_godelian_error_correction(self.state)
+            VirtualEnhancements.semantic_curvature_sourcing(self.state)
+            VirtualEnhancements.fractal_scale_memory(self.state)
+            VirtualEnhancements.temporal_standing_waves(self.state)
+            VirtualEnhancements.paradox_pressure_compression(self.state)
+            VirtualEnhancements.retrocausal_amplification(self.state)
+            VirtualEnhancements.non_hermitian_consciousness(self.state)
 
-        # Goal-driven steering
-        self._goal_steer_embeddings()
+            UnificationEquations.U1(self.state)
+            UnificationEquations.U2(self.state)
+            UnificationEquations.U3(self.state)
+            UnificationEquations.U4(self.state)
+            UnificationEquations.U5(self.state)
+            UnificationEquations.U6(self.state)
 
-        # Update metrics (includes reward propagation, fitness, eviction)
-        self._update_metrics()
+            # Generate new concept (mutation)
+            if self.state.concepts:
+                base = random.choice(self.state.concepts)
+                mutation_rate = self.state.rne_context.params.get("mutation_rate", 0.15)
+                burst_prob = self.config.get("burst_probability", 0.12)
+                burst_factor = self.config.get("burst_factor", 3.5)
+                if np.random.rand() < burst_prob:
+                    mutation_rate = mutation_rate * burst_factor
 
-        # Virtual enhancements
-        VirtualEnhancements.z3_godelian_error_correction(self.state)
-        VirtualEnhancements.semantic_curvature_sourcing(self.state)
-        VirtualEnhancements.fractal_scale_memory(self.state)
-        VirtualEnhancements.temporal_standing_waves(self.state)
-        VirtualEnhancements.paradox_pressure_compression(self.state)
-        VirtualEnhancements.retrocausal_amplification(self.state)
-        VirtualEnhancements.non_hermitian_consciousness(self.state)
+                new_emb = base.subsymbolic + mutation_rate * np.random.randn(*base.subsymbolic.shape)
+                new_emb = project_to_ball(new_emb)
 
-        # Unification equations
-        UnificationEquations.U1(self.state)
-        UnificationEquations.U2(self.state)
-        UnificationEquations.U3(self.state)
-        UnificationEquations.U4(self.state)
-        UnificationEquations.U5(self.state)
-        UnificationEquations.U6(self.state)
+                parent_root = base.symbolic[0] if base.symbolic else "concept"
+                if parent_root.startswith("auto_") or parent_root.startswith("mut_"):
+                    parent_root = base.symbolic[1] if len(base.symbolic) > 1 else "concept"
 
-        # Generate new concepts (mutation)
-        if self.state.concepts:
-            base = random.choice(self.state.concepts)
-            # Use adaptive mutation rate with burst logic
-            mutation_rate = self.state.rne_context.params.get("mutation_rate", 0.15)
-            burst_prob = self.config.get("burst_probability", 0.12)
-            burst_factor = self.config.get("burst_factor", 3.5)
-            if np.random.rand() < burst_prob:
-                mutation_rate = mutation_rate * burst_factor
+                new_c = Concept(
+                    subsymbolic=new_emb,
+                    symbolic=[],
+                    causal_graph=base.causal_graph.copy(),
+                    sophia_score=np.clip(base.sophia_score + mutation_rate * np.random.randn(), 0, 1),
+                    dark_wisdom_density=np.clip(base.dark_wisdom_density + mutation_rate * np.random.randn(), 0, 1),
+                    paradox_intensity=np.clip(base.paradox_intensity + mutation_rate * np.random.randn(), 0, 1),
+                    chronon_entanglement=np.clip(base.chronon_entanglement + mutation_rate * np.random.randn(), 0, 1),
+                    biophoton_amplitude=np.clip(base.biophoton_amplitude + mutation_rate * np.random.randn(), 0, 1),
+                    z3_phase=base.z3_phase,
+                    retrocausal_kernel=base.retrocausal_kernel + mutation_rate * np.random.randn(*base.retrocausal_kernel.shape),
+                    uuid=str(uuid.uuid4())
+                )
+                fields = [("sophia", new_c.sophia_score), ("wisdom", new_c.dark_wisdom_density), ("paradox", new_c.paradox_intensity)]
+                dominant = max(fields, key=lambda x: x[1])[0]
+                new_c.symbolic = [f"mut_{dominant}_{self.state.step}", parent_root]
 
-            new_emb = base.subsymbolic + mutation_rate * np.random.randn(*base.subsymbolic.shape)
-            new_emb = project_to_ball(new_emb)
+                novelty_threshold = self.config.get("novelty_acceptance_threshold", 0.08)
+                novelty = self._fast_novelty(new_c)
+                if novelty >= novelty_threshold:
+                    self.state.concepts.append(new_c)
+                    self.state.rne_context.add_to_memory(new_c)
+                    self.qhdram.store(f"auto_{self.state.step}", new_c.subsymbolic)
+                    self.state.concept_goals[new_c.uuid] = self.state.global_goal
+                    self.state.concept_fitness[new_c.uuid] = self._compute_fitness(new_c, self.state.global_goal)
+                    self.state.concept_rewards[new_c.uuid] = []
 
-            # Build a meaningful symbolic identity
-            parent_root = base.symbolic[0] if base.symbolic else "concept"
-            # Strip any previous auto_/mut_ suffixes
-            if parent_root.startswith("auto_") or parent_root.startswith("mut_"):
-                parent_root = base.symbolic[1] if len(base.symbolic) > 1 else "concept"
-            # Encode the dominant field as part of the name
-            # We'll create a temporary concept with the new embedding to evaluate its fields later
-            # Actually we need to compute fields after the concept is created; we'll compute after
-            new_c = Concept(
-                subsymbolic=new_emb,
-                symbolic=[],  # temporary
-                causal_graph=base.causal_graph.copy(),
-                sophia_score=np.clip(base.sophia_score + mutation_rate * np.random.randn(), 0, 1),
-                dark_wisdom_density=np.clip(base.dark_wisdom_density + mutation_rate * np.random.randn(), 0, 1),
-                paradox_intensity=np.clip(base.paradox_intensity + mutation_rate * np.random.randn(), 0, 1),
-                chronon_entanglement=np.clip(base.chronon_entanglement + mutation_rate * np.random.randn(), 0, 1),
-                biophoton_amplitude=np.clip(base.biophoton_amplitude + mutation_rate * np.random.randn(), 0, 1),
-                z3_phase=base.z3_phase,
-                retrocausal_kernel=base.retrocausal_kernel + mutation_rate * np.random.randn(*base.retrocausal_kernel.shape)
-            )
-            # Determine dominant field
-            fields = [("sophia", new_c.sophia_score),
-                      ("wisdom", new_c.dark_wisdom_density),
-                      ("paradox", new_c.paradox_intensity)]
-            dominant = max(fields, key=lambda x: x[1])[0]
-            new_sym = [f"mut_{dominant}_{self.state.step}", parent_root]
-            new_c.symbolic = new_sym
+            if self.state.step % self.config.get("ann_update_interval", 10) == 0:
+                self._rebuild_ann_index()
 
-            # Novelty gate: only accept concepts that are sufficiently different
-            novelty_threshold = self.config.get("novelty_acceptance_threshold", 0.08)
-            novelty = self._fast_novelty(new_c)
-            if novelty >= novelty_threshold:
-                self.state.concepts.append(new_c)
-                self.state.rne_context.add_to_memory(new_c)
-                self.qhdram.store(f"auto_{self.state.step}", new_c.subsymbolic)
-                new_idx = len(self.state.concepts) - 1
-                # Assign goal based on global goal
-                self.state.concept_goals[new_idx] = self.state.global_goal
-                self.state.concept_fitness[new_idx] = self._compute_fitness(new_c, self.state.global_goal)
-                self.state.concept_rewards[new_idx] = []
-            # else: reject concept, skip goal/fitness assignment
+            if self.state.step % 10 == 0 and self.state.concepts:
+                example = self.state.concepts[0]
+                self.substrate.write(f"concept_{self.state.step}", example.subsymbolic, example.z3_phase)
+                _ = self.substrate.read(example.subsymbolic)
 
-        # Rebuild ANN index periodically
-        if self.state.step % self.config.get("ann_update_interval", 10) == 0:
+            if self.state.consciousness_tracker:
+                self.state.consciousness_tracker.update(self.state.rne_context, entity=None)
+
+            if self.swarm is not None and self.state.step % 2 == 0:
+                self.swarm.step(self.state.rne_context)
+
+            if self.checkpoint_manager is not None and self.state.step % self.config["checkpoint_interval"] == 0:
+                self.checkpoint_manager.save_checkpoint(self.state, name=f"step_{self.state.step}")
+
+    # -------------------------------------------------------------------------
+    # Public API (thread-safe, no internal authentication checks)
+    # -------------------------------------------------------------------------
+    def store_concept(self, concept: Concept, goal_vector: Optional[GoalField] = None) -> str:
+        """Store a concept (assumes caller is authenticated). Returns UUID."""
+        with self._lock:
+            if goal_vector is None:
+                goal_vector = self.state.global_goal
+            concept.uuid = str(uuid.uuid4())
+            self.state.concepts.append(concept)
+            self.state.rne_context.add_to_memory(concept)
+            self.qhdram.store(f"concept_{concept.uuid}", concept.subsymbolic)
+            self.state.concept_goals[concept.uuid] = goal_vector
+            self.state.concept_fitness[concept.uuid] = self._compute_fitness(concept, goal_vector)
+            self.state.concept_rewards[concept.uuid] = []
+            self._update_pareto_front()
             self._rebuild_ann_index()
-
-        # Physical substrate demo
-        if self.state.step % 10 == 0 and self.state.concepts:
-            example = self.state.concepts[0]
-            self.substrate.write(f"concept_{self.state.step}", example.subsymbolic, example.z3_phase)
-            _ = self.substrate.read(example.subsymbolic)
-
-        # Consciousness tracker
-        if self.state.consciousness_tracker:
-            self.state.consciousness_tracker.update(self.state.rne_context, entity=None)
-
-        # Swarm dynamics
-        if self.swarm is not None and self.state.step % 2 == 0:
-            self.swarm.step(self.state.rne_context)
-
-        # Checkpoint
-        if self.checkpoint_manager is not None and self.state.step % self.config["checkpoint_interval"] == 0:
-            self.checkpoint_manager.save_checkpoint(self.state, name=f"step_{self.state.step}")
-
-    # -------------------------------------------------------------------------
-    # Public API (no internal authentication checks)
-    # -------------------------------------------------------------------------
-    def store_concept(self, concept: Concept, goal_vector: Optional[GoalField] = None) -> int:
-        """Store a concept (assumes caller is authenticated)."""
-        idx = len(self.state.concepts)
-        self.state.concepts.append(concept)
-        self.state.rne_context.add_to_memory(concept)
-        self.qhdram.store(f"concept_{idx}", concept.subsymbolic)
-        if goal_vector is None:
-            goal_vector = self.state.global_goal
-        self.state.concept_goals[idx] = goal_vector
-        self.state.concept_fitness[idx] = self._compute_fitness(concept, goal_vector)
-        self.state.concept_rewards[idx] = []
-        self._update_pareto_front()
-        self._rebuild_ann_index()
-        return idx
+            return concept.uuid
 
     def retrieve_similar(self, query_embedding: NDArray[np.float64], k: int = 5,
                          query_goal: Optional[GoalField] = None) -> List[Tuple[Concept, float, Optional[GoalField]]]:
         """Retrieve similar concepts (assumes caller is authenticated)."""
-        if not self.state.concepts:
-            return []
-        # Use ANN index if available
-        if self.state.ann_index is not None and k <= 5:
-            # Approximate search
-            distances, indices = self.state.ann_index.kneighbors(query_embedding.reshape(1,-1), n_neighbors=k)
-            results = []
-            for dist, idx in zip(distances[0], indices[0]):
-                c = self.state.concepts[idx]
-                goal = self.state.concept_goals.get(idx, GoalField(0,0,0))
-                # Optionally incorporate query_goal
-                if query_goal is not None:
-                    goal_dist = query_goal.distance_to(goal)
-                    combined = dist + 0.5 * goal_dist
-                    results.append((c, combined, goal))
-                else:
-                    results.append((c, dist, goal))
-            results.sort(key=lambda x: x[1])
-            return results[:k]
-        else:
-            # Fallback to linear scan
-            distances = [(c, mobius_distance(query_embedding, c.subsymbolic)) for c in self.state.concepts]
-            if query_goal is not None:
-                for i, (c, dist) in enumerate(distances):
-                    idx = self.state.concepts.index(c)
-                    goal = self.state.concept_goals.get(idx, GoalField(0,0,0))
-                    goal_dist = query_goal.distance_to(goal)
-                    combined = dist + 0.5 * goal_dist
-                    distances[i] = (c, combined, goal)
+        with self._lock:
+            if not self.state.concepts:
+                return []
+            if self.state.ann_index is not None and k <= 5:
+                distances, indices = self.state.ann_index.kneighbors(query_embedding.reshape(1,-1), n_neighbors=k)
+                results = []
+                for dist, idx in zip(distances[0], indices[0]):
+                    c = self.state.concepts[idx]
+                    goal = self.state.concept_goals.get(c.uuid, GoalField(0,0,0))
+                    if query_goal is not None:
+                        goal_dist = query_goal.distance_to(goal)
+                        combined = dist + 0.5 * goal_dist
+                        results.append((c, combined, goal))
+                    else:
+                        results.append((c, dist, goal))
+                results.sort(key=lambda x: x[1])
+                return results[:k]
             else:
-                distances = [(c, d, None) for c, d in distances]
-            distances.sort(key=lambda x: x[1])
-            results = []
-            for i in range(min(k, len(distances))):
-                concept, dist, goal = distances[i]
-                results.append((concept, dist, goal))
-            return results
+                distances = [(c, mobius_distance(query_embedding, c.subsymbolic)) for c in self.state.concepts]
+                if query_goal is not None:
+                    for i, (c, dist) in enumerate(distances):
+                        goal = self.state.concept_goals.get(c.uuid, GoalField(0,0,0))
+                        goal_dist = query_goal.distance_to(goal)
+                        combined = dist + 0.5 * goal_dist
+                        distances[i] = (c, combined, goal)
+                else:
+                    distances = [(c, d, None) for c, d in distances]
+                distances.sort(key=lambda x: x[1])
+                results = []
+                for i in range(min(k, len(distances))):
+                    concept, dist, goal = distances[i]
+                    results.append((concept, dist, goal))
+                return results
 
-    def apply_goal_vector(self, concept_id: int, new_goal: GoalField) -> bool:
-        if concept_id < 0 or concept_id >= len(self.state.concepts):
-            return False
-        self.state.concept_goals[concept_id] = new_goal
-        self.state.concept_fitness[concept_id] = self._compute_fitness(self.state.concepts[concept_id], new_goal)
-        self._update_pareto_front()
-        return True
+    def apply_goal_vector(self, concept_uuid: str, new_goal: GoalField) -> bool:
+        with self._lock:
+            if concept_uuid not in self.state.concept_goals:
+                return False
+            self.state.concept_goals[concept_uuid] = new_goal
+            concept = next((c for c in self.state.concepts if c.uuid == concept_uuid), None)
+            if concept is None:
+                return False
+            self.state.concept_fitness[concept_uuid] = self._compute_fitness(concept, new_goal)
+            self._update_pareto_front()
+            return True
 
     def set_global_goal(self, goal: GoalField):
-        self.state.global_goal = goal
-        if not self.state.goal_stack or self.state.goal_stack[-1] != goal:
-            self.state.goal_stack.append(goal)
-        if len(self.state.goal_stack) > 10:
-            self.state.goal_stack.pop(0)
+        with self._lock:
+            self.state.global_goal = goal
+            if not self.state.goal_stack or self.state.goal_stack[-1] != goal:
+                self.state.goal_stack.append(goal)
+            if len(self.state.goal_stack) > 10:
+                self.state.goal_stack.pop(0)
 
     def get_state_snapshot(self) -> dict:
-        memory_mb = len(self.state.concepts) * self.config["embedding_dim"] * 4 / (1024 * 1024)
-        return {
-            "step": self.state.step,
-            "sophia_score": self.state.sophia_score,
-            "dark_wisdom": self.state.dark_wisdom_density,
-            "paradox": self.state.paradox_intensity,
-            "triple_point": self.state.triple_point_index,
-            "concept_count": len(self.state.concepts),
-            "memory_usage_mb": round(memory_mb, 2),
-            "resource_usage": self.resource_monitor.get_cost_summary(),
-            "global_goal": self.state.global_goal.as_array().tolist() if self.state.global_goal else None,
-            "avg_fitness": np.mean(list(self.state.concept_fitness.values())) if self.state.concept_fitness else 0.0,
-        }
+        with self._lock:
+            memory_mb = len(self.state.concepts) * self.config["embedding_dim"] * 4 / (1024 * 1024)
+            return {
+                "step": self.state.step,
+                "sophia_score": self.state.sophia_score,
+                "dark_wisdom": self.state.dark_wisdom_density,
+                "paradox": self.state.paradox_intensity,
+                "triple_point": self.state.triple_point_index,
+                "concept_count": len(self.state.concepts),
+                "memory_usage_mb": round(memory_mb, 2),
+                "resource_usage": self.resource_monitor.get_cost_summary(),
+                "global_goal": self.state.global_goal.as_array().tolist() if self.state.global_goal else None,
+                "avg_fitness": np.mean(list(self.state.concept_fitness.values())) if self.state.concept_fitness else 0.0,
+            }
 
     def get_metrics(self) -> dict:
-        memory_mb = len(self.state.concepts) * self.config["embedding_dim"] * 4 / (1024 * 1024)
-        return {
-            "step": self.state.step,
-            "sophia": round(self.state.sophia_score, 3),
-            "dark_wisdom": round(self.state.dark_wisdom_density, 3),
-            "paradox": round(self.state.paradox_intensity, 3),
-            "triple_point": round(self.state.triple_point_index, 3),
-            "holo_entropy": round(self.state.holographic_entropy, 3),
-            "memory_usage_mb": round(memory_mb, 2),
-            "consciousness_active": self.state.non_hermitian_term > 0.2,
-            "meta_depth": round(self.state.meta_depth, 2),
-            "z3_phase": self.state.z3_phase,
-            "non_hermitian": round(self.state.non_hermitian_term, 3),
-            "ricci_proxy": round(self.state.ricci_proxy, 3),
-            "concept_count": len(self.state.concepts),
-            "betti_0": self.state.betti_0,
-            "betti_1": self.state.betti_1,
-            "spiritual_score": round(self.state.spiritual_score, 3),
-            "chronon_entanglement": round(self.state.chronon_entanglement, 3),
-            "biophoton_amplitude": round(self.state.biophoton_amplitude, 3),
-            "resource": self.resource_monitor.get_cost_summary(),
-            "avg_fitness": round(np.mean(list(self.state.concept_fitness.values())) if self.state.concept_fitness else 0.0, 3),
-            "pareto_front_size": len(self.state.concept_pareto_front),
-        }
+        with self._lock:
+            memory_mb = len(self.state.concepts) * self.config["embedding_dim"] * 4 / (1024 * 1024)
+            return {
+                "step": self.state.step,
+                "sophia": round(self.state.sophia_score, 3),
+                "dark_wisdom": round(self.state.dark_wisdom_density, 3),
+                "paradox": round(self.state.paradox_intensity, 3),
+                "triple_point": round(self.state.triple_point_index, 3),
+                "holo_entropy": round(self.state.holographic_entropy, 3),
+                "memory_usage_mb": round(memory_mb, 2),
+                "consciousness_active": self.state.non_hermitian_term > 0.2,
+                "meta_depth": round(self.state.meta_depth, 2),
+                "z3_phase": self.state.z3_phase,
+                "non_hermitian": round(self.state.non_hermitian_term, 3),
+                "ricci_proxy": round(self.state.ricci_proxy, 3),
+                "concept_count": len(self.state.concepts),
+                "betti_0": self.state.betti_0,
+                "betti_1": self.state.betti_1,
+                "spiritual_score": round(self.state.spiritual_score, 3),
+                "chronon_entanglement": round(self.state.chronon_entanglement, 3),
+                "biophoton_amplitude": round(self.state.biophoton_amplitude, 3),
+                "resource": self.resource_monitor.get_cost_summary(),
+                "avg_fitness": round(np.mean(list(self.state.concept_fitness.values())) if self.state.concept_fitness else 0.0, 3),
+                "pareto_front_size": len(self.state.concept_pareto_front),
+            }
 
 # -----------------------------------------------------------------------------
 # Main (if run directly)
