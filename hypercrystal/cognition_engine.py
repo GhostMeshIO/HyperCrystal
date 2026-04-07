@@ -163,7 +163,8 @@ class DiffusionNoveltyInjector:
         novelty_threshold = self.config.get("novelty_acceptance_threshold", 0.08)
         novelty = self.crystal._fast_novelty(new_c)
         if novelty >= novelty_threshold:
-            self.crystal.store_concept(new_c, goal=self.crystal.state.global_goal)
+            # FIX: use goal_vector= instead of goal=
+            self.crystal.store_concept(new_c, goal_vector=self.crystal.state.global_goal)
         self.step_count += 1
 
 # -----------------------------------------------------------------------------
@@ -400,8 +401,8 @@ class MetaLearner:
                 retrocausal_kernel=np.mean([c.retrocausal_kernel for c in cluster_concepts], axis=0)
                     if cluster_concepts[0].retrocausal_kernel is not None else None
             )
-            # store_concept now returns UUID; we ignore it
-            self.crystal.store_concept(new_concept, goal=self.crystal.state.global_goal)
+            # FIX: use goal_vector= instead of goal=
+            self.crystal.store_concept(new_concept, goal_vector=self.crystal.state.global_goal)
 
     def run_benchmark(self):
         if self.crystal.state.step - self.last_benchmark_step < self.benchmark_interval:
