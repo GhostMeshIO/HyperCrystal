@@ -1,0 +1,18 @@
+# Optional dependencies for HyperCrystal
+# Install with: pip install -r requirements-optional.txt
+
+# Meta‑learning with CMA‑ES
+cma>=3.2.0,<4.0
+
+# Topological data analysis (persistent homology, Betti numbers)
+gudhi>=3.0.0,<4.0
+
+# PyTorch – for neural novelty scoring and diffusion models
+torch>=2.0.0,<3.0
+
+# Fast incremental approximate nearest neighbour index
+hnswlib>=0.7.0,<1.0
+
+# For advanced metrics (optional)
+pot>=0.9.0          # Optimal Transport
+scipy>=1.10.0
