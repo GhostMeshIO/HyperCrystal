@@ -1,0 +1,31 @@
+# Secrets and credentials
+.env
+users.json
+hypercrystal_config.json
+
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Checkpoints and data
+checkpoints/
+data/
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
